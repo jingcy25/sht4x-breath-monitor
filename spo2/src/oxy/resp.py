@@ -25,7 +25,8 @@ from scipy.signal import find_peaks
 
 from . import dsp
 
-FEATURE_WEIGHTS: Dict[str, float] = {"resp_mod": 0.5, "rsa": 0.3, "pwa": 0.2}
+FEATURE_WEIGHTS: Dict[str, float] = {"resp_mod": 0.40, "rsa": 0.25, "pwa": 0.15, "hr_drop": 0.20}
+HR_DROP_FULL_BPM = 8.0
 
 # Minimum feature magnitude used as the denominator. Without it a subject who
 # barely modulated during calibration would produce huge "drops" from noise.
@@ -328,20 +329,30 @@ class PPGBreathHoldDetector:
         drops: Dict[str, Optional[float]] = {}
         if self.baseline is None:
             return {name: None for name in FEATURE_WEIGHTS}
-        for name in FEATURE_WEIGHTS:
+
+        for name in ("resp_mod", "rsa", "pwa"):
             value = features.get(name)
             if value is None:
                 drops[name] = None
                 continue
             denominator = max(self.baseline[name], FEATURE_FLOOR[name])
             drops[name] = float(np.clip(1.0 - value / denominator, 0.0, 1.0))
+
+        hr = features.get("hr_bpm")
+        if self.baseline_hr is None or hr is None:
+            drops["hr_drop"] = None
+        else:
+            drops["hr_drop"] = float(
+                np.clip((self.baseline_hr - float(hr)) / HR_DROP_FULL_BPM, 0.0, 1.0)
+            )
         return drops
 
     def _baseline_strength(self) -> float:
         if self.baseline is None:
             return 0.0
         ratios = [
-            self.baseline[name] / FEATURE_FLOOR[name] for name in FEATURE_WEIGHTS
+            self.baseline[name] / FEATURE_FLOOR[name]
+            for name in ("resp_mod", "rsa", "pwa")
         ]
         return float(np.clip(min(ratios), 0.0, 1.0))
 

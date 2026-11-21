@@ -149,6 +149,7 @@ JSONL，供后续多设备加权融合。
 | `resp_mod` | 呼吸引起的基线起伏 | IR 在 0.15–0.40 Hz 的谱峰幅度 / DC | 0.6–1.5 % |
 | `rsa` | 呼吸性窦性心律不齐 | RR 序列同带谱峰 / 平均 RR | 2–6 % |
 | `pwa` | 呼吸性脉搏振幅调制 | 每搏幅度同带谱峰 / 平均幅度 | 6–15 % |
+| `hr_drop` | 憋气时的窦性心动过缓 | (基线 HR − 当前 HR) / 8 bpm | 0（正常）/ 0.8–1（憋气） |
 
 用 FFT + Hann 窗而不是低阶带通：0.15 Hz 高通在 7 s 窗口上的暂态比窗口本身还长，
 实测会让同一段憋气内的特征跳变一个数量级。
@@ -158,17 +159,26 @@ JSONL，供后续多设备加权融合。
 先正常呼吸约 20 s 采集个人基线（各特征中位数），之后：
 
 ```
-drop_i = clip(1 - current_i / max(baseline_i, floor_i), 0, 1)
-score  = 0.5*drop_resp + 0.3*drop_rsa + 0.2*drop_pwa
+drop_i  = clip(1 - current_i / max(baseline_i, floor_i), 0, 1)   # resp/rsa/pwa
+drop_hr = clip((baseline_hr - hr) / 8, 0, 1)
+score   = 0.40*drop_resp + 0.25*drop_rsa + 0.15*drop_pwa + 0.20*drop_hr
 ```
+
+权重是用 5 组真人标签（`labels.csv`）离线扫描定的。只靠三项呼吸特征时，
+该受试者 `resp_mod` 基线仅 0.17，正常段分数就能到 0.5；加入 HR 项后
+`enter_score=0.55` 下 4 段全检出、0 次误报。
 
 - 窗口：`resp_mod` 7 s，RSA/PWA 16 s，1 s 更新
 - 进入 hold：score ≥ 0.55 连续 2 s
 - 退出 hold：score ≤ 0.40 连续 4 s
 - 手指离开或 SQI 不足 → `no_signal`，计数器清零；重新放上后需 4 s 有效数据才允许再进
 
-仿真实测（`oxy hold-sim`）：**检出延迟 8 s**，释放后约 10 s 回到 `normal`，
-120 s 无憋气运行 0 次误报。真人延迟会更大，因为呼吸调制不是瞬间消失。
+仿真实测（`oxy hold-sim`）：检出延迟约 8–9 s，释放后约 10 s 回到 `normal`，
+120 s 无憋气运行 0 次误报。
+
+真人实测（5 组标签）：按键到检出 18–24 s，但其中约 10 s 是"按键后先准备再屏息"
+造成的——HR 从按键后 10 s 才开始下降。**按空格的那一刻就要停止呼吸**，否则测出的
+延迟没有意义。
 
 ### 11.3 输出（融合接口）
 
