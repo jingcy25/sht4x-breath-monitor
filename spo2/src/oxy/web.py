@@ -89,6 +89,7 @@ class HoldWebApp:
             "t": hold.get("t", 0.0),
             "state": hold.get("state", "warming"),
             "score": hold.get("score", 0.0),
+            "fast_score": hold.get("fast_score", 0.0),
             "confidence": hold.get("confidence", 0.0),
             "hr": result.get("hr_bpm"),
             "spo2": result.get("spo2_pct"),

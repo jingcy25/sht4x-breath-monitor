@@ -417,6 +417,20 @@ class PPGBreathHoldDetector:
             "baseline": self.baseline,
             "baseline_hr": self.baseline_hr,
         }
+
+        # Fast channel: only the two features that react within a few seconds.
+        # It is deliberately exposed but NOT used for the standalone state, so a
+        # fusion layer can trade latency against false positives on its own.
+        fast_terms = [(0.7, drops.get("resp_mod")), (0.3, drops.get("hr_drop"))]
+        available = [(weight, value) for weight, value in fast_terms if value is not None]
+        if available:
+            payload["fast_score"] = round(
+                sum(weight * float(value) for weight, value in available)
+                / sum(weight for weight, _ in available),
+                3,
+            )
+        else:
+            payload["fast_score"] = 0.0
         if progress is not None:
             payload["calib_progress"] = round(float(progress), 3)
         return payload
