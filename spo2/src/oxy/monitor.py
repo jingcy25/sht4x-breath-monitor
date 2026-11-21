@@ -15,6 +15,7 @@ import csv
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Protocol, Tuple
@@ -92,6 +93,7 @@ class Monitor:
         quiet: bool = False,
         hold_detector: Any = None,
         jsonl_path: Optional[str] = None,
+        threaded: Optional[bool] = None,
     ) -> None:
         self.device = device
         self.fs = float(fs)
@@ -112,6 +114,11 @@ class Monitor:
         self.quiet = quiet
         self.hold_detector = hold_detector
         self.jsonl_path = jsonl_path
+        # Hardware runs threaded so a slow analysis cannot starve the FIFO.
+        # Simulated runs keep the single-threaded, deterministic path.
+        self.threaded = bool(threaded) if threaded is not None else (clock is None)
+        self._lock = threading.Lock()
+        self._running = False
 
         required_s = self.window_s
         if hold_detector is not None:
@@ -183,8 +190,9 @@ class Monitor:
         red_chunk = np.fromiter((sample[0] for sample in samples), dtype=float)
         ir_chunk = np.fromiter((sample[1] for sample in samples), dtype=float)
 
-        self._red = np.concatenate((self._red, red_chunk))[-self._maxlen :]
-        self._ir = np.concatenate((self._ir, ir_chunk))[-self._maxlen :]
+        with self._lock:
+            self._red = np.concatenate((self._red, red_chunk))[-self._maxlen :]
+            self._ir = np.concatenate((self._ir, ir_chunk))[-self._maxlen :]
 
         if self._raw_writer is not None:
             for offset, (red, ir) in enumerate(samples):
@@ -202,9 +210,14 @@ class Monitor:
         if self._red.size < minimum:
             return {"valid": False, "finger": False, "warmup": True}
 
+        with self._lock:
+            red_snapshot = self._red
+            ir_snapshot = self._ir
+
+        window_samples = max(32, int(round(self.window_s * self.fs)))
         result = dsp.analyze_window(
-            self._red,
-            self._ir,
+            red_snapshot[-window_samples:],
+            ir_snapshot[-window_samples:],
             self.fs,
             coeffs=self.coeffs,
             min_sqi=self.min_sqi,
@@ -223,7 +236,7 @@ class Monitor:
 
         hold_record = None
         if self.hold_detector is not None:
-            hold_record = self.hold_detector.update(self._red, self._ir, elapsed_s)
+            hold_record = self.hold_detector.update(red_snapshot, ir_snapshot, elapsed_s)
             if hold_record["state"] == "hold":
                 self.stats["hold_seconds"] += 1
             if (
@@ -294,6 +307,23 @@ class Monitor:
             print(line, flush=True)
         return result
 
+    def _read_loop(self, samples_per_poll: int) -> None:
+        """Drain the FIFO independently of how slow the analysis is."""
+        while self._running:
+            try:
+                samples, overflowed = self.device.read_fifo()
+                if overflowed:
+                    with self._lock:
+                        self.stats["overflow_events"] += 1
+                    LOGGER.warning("FIFO overflow detected; samples were lost")
+                if samples:
+                    self._append(samples)
+                    if len(samples) < samples_per_poll:
+                        LOGGER.debug("short FIFO read: %d samples", len(samples))
+            except Exception:
+                LOGGER.exception("FIFO read failed; retrying")
+            self.clock.sleep(self.poll_interval_s)
+
     # ------------------------------------------------------------------ run
     def run(self, duration_s: float = 0.0) -> Dict[str, Any]:
         """Run until ``duration_s`` elapses (0 means until interrupted)."""
@@ -302,6 +332,14 @@ class Monitor:
         last_emit = start
         samples_per_poll = max(1, int(round(self.poll_interval_s * self.fs)))
 
+        self._running = True
+        reader: Optional[threading.Thread] = None
+        if self.threaded:
+            reader = threading.Thread(
+                target=self._read_loop, args=(samples_per_poll,), daemon=True
+            )
+            reader.start()
+
         try:
             try:
                 while True:
@@ -309,17 +347,18 @@ class Monitor:
                     if duration_s > 0 and elapsed >= duration_s:
                         break
 
-                    samples, overflowed = self.device.read_fifo()
-                    if overflowed:
-                        self.stats["overflow_events"] += 1
-                        LOGGER.warning("FIFO overflow detected; samples were lost")
-                    self._append(samples)
+                    if not self.threaded:
+                        samples, overflowed = self.device.read_fifo()
+                        if overflowed:
+                            self.stats["overflow_events"] += 1
+                            LOGGER.warning("FIFO overflow detected; samples were lost")
+                        self._append(samples)
 
-                    if 0 < len(samples) < samples_per_poll:
-                        LOGGER.warning(
-                            "short FIFO read (%d samples); the Pi is falling behind",
-                            len(samples),
-                        )
+                        if 0 < len(samples) < samples_per_poll:
+                            LOGGER.warning(
+                                "short FIFO read (%d samples); the Pi is falling behind",
+                                len(samples),
+                            )
 
                     now = self.clock.monotonic()
                     if now - last_emit >= self.emit_interval_s - 1e-6:
@@ -327,10 +366,16 @@ class Monitor:
                         if not result.get("warmup"):
                             last_emit = now
 
-                    self.clock.sleep(self.poll_interval_s)
+                    if self.threaded:
+                        self.clock.sleep(min(0.05, self.emit_interval_s))
+                    else:
+                        self.clock.sleep(self.poll_interval_s)
             except KeyboardInterrupt:
                 LOGGER.info("acquisition interrupted by user")
         finally:
+            self._running = False
+            if reader is not None:
+                reader.join(timeout=2.0)
             self._close_outputs()
 
         emitted = self.stats["emitted"]

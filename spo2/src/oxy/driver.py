@@ -134,8 +134,10 @@ class MAX30102:
 
     def _configure(self) -> None:
         self.reset()
-        # SMP_AVE=1, rollover disabled, almost-full threshold = 15 remaining
-        self._write_byte(REG_FIFO_CONFIG, 0x0F)
+        # SMP_AVE=1, rollover ENABLED, almost-full threshold = 15 remaining.
+        # Rollover matters: with it disabled the FIFO stops writing when full
+        # and WR == RD (mod 32), which is indistinguishable from "empty".
+        self._write_byte(REG_FIFO_CONFIG, 0x1F)
         # SpO2 mode: red + IR
         self._write_byte(REG_MODE_CONFIG, _MODE_SPO2)
         # 4096 nA range, 100 sps (default), 411 us / 18-bit pulses
@@ -171,8 +173,14 @@ class MAX30102:
         overflowed = overflow_counter != self._last_ovf
         self._last_ovf = overflow_counter
 
+        # The pointers are 5 bits wide, so a full 32-sample FIFO and an empty
+        # one both read as zero. Without this branch a full FIFO deadlocks the
+        # driver permanently: it keeps seeing "no data" and never drains it.
         if count == 0:
-            return [], overflowed
+            if overflowed:
+                count = 32
+            else:
+                return [], False
 
         payload = self._read_block(REG_FIFO_DATA, count * 6)
         if len(payload) < count * 6:
