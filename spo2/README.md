@@ -86,6 +86,7 @@ t=  13.0s  HR=-- bpm  SpO2=--%    PI=--%     SQI=0.31  red=   512 ir=   604  [NO
 | `oxy selftest` | 无硬件自检（含憋气识别用例） |
 | `oxy hold` | **PPG 单独憋气识别**（实时，输出 CSV + JSONL） |
 | `oxy hold-sim` | 仿真验证憋气识别（无硬件） |
+| `oxy web` | 网页界面：实时分数 + 空格打标（开始/结束憋气） |
 | `oxy plot SUM.csv OUT.png` | 画 4 联图 |
 
 ## 憋气识别（仅 PPG）
@@ -100,6 +101,24 @@ PYTHONPATH=src python3 -m oxy.cli hold-sim --hold-start 40 --hold-dur 25
 
 每秒输出一条 JSONL，字段 `state / score / confidence / features / drops`，可直接给
 后续多设备加权融合使用。原理、打分公式与局限见 `docs/experiment.md` 第 11 节。
+
+### 网页打标（推荐先用这个）
+
+```bash
+PYTHONPATH=src python3 -m oxy.cli web --port 8001
+# 浏览器打开 http://<树莓派IP>:8001
+```
+
+页面上正常呼吸约 20 秒（`calibrating` → `normal`），按**空格**标记"开始憋气"，
+松口后再按一次标记"恢复呼吸"。标签落到 `data/labels.csv`，同时记录当时的
+state/score/特征。之后用真实标签评估延迟并挑阈值：
+
+```bash
+python3 scripts/evaluate_labels.py --labels data/labels.csv --timeline data/hold_web_*.csv
+```
+
+脚本会输出每段憋气的检出延迟、漏检、误报秒数，以及 `enter_score` 从 0.45 到 0.75
+的扫描表，直接给出推荐阈值。没有硬件时可以加 `--simulate` 先看界面。
 
 ## 目录
 

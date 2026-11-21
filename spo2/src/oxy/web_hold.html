@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PPG 憋气识别</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#121821; --line:#1e2632; --text:#dbe4ee;
+    --muted:#7c8a9c; --accent:#2dd4bf; --warn:#f5b942; --bad:#f87171; --good:#34d399;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+  header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;
+         padding:22px 26px 10px}
+  h1{margin:0;font-size:20px;letter-spacing:.3px}
+  .tag{font-size:11px;font-weight:600;color:#0b0f14;background:var(--accent);
+       padding:2px 7px;border-radius:999px;vertical-align:2px;margin-left:6px}
+  .hint{margin:6px 0 0;color:var(--muted);font-size:12.5px}
+  .badge{font-size:12px;padding:6px 12px;border-radius:999px;border:1px solid var(--line);
+         color:var(--muted);white-space:nowrap}
+  .badge.on{color:var(--good);border-color:rgba(52,211,153,.4)}
+  .badge.off{color:var(--bad);border-color:rgba(248,113,113,.4)}
+  main{max-width:1040px;margin:0 auto;padding:8px 26px 40px}
+  .hero{display:flex;flex-wrap:wrap;align-items:center;gap:26px;
+        background:var(--panel);border:1px solid var(--line);border-radius:16px;
+        padding:22px 26px;margin-bottom:16px}
+  .score-wrap{min-width:190px}
+  #score{font-size:58px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
+  .score-label{color:var(--muted);font-size:11px;letter-spacing:1.4px;margin-top:6px}
+  #state{font-size:15px;font-weight:600;padding:8px 16px;border-radius:10px;
+         border:1px solid var(--line);min-width:120px;text-align:center}
+  #state.normal{color:var(--good);border-color:rgba(52,211,153,.45);background:rgba(52,211,153,.08)}
+  #state.hold{color:var(--bad);border-color:rgba(248,113,113,.5);background:rgba(248,113,113,.1)}
+  #state.calibrating{color:var(--warn);border-color:rgba(245,185,66,.45);background:rgba(245,185,66,.08)}
+  #state.warming,#state.no_signal{color:var(--muted)}
+  .metrics{display:grid;grid-template-columns:repeat(4,minmax(78px,1fr));gap:14px;flex:1;min-width:320px}
+  .metric{background:#0e141c;border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+  .metric span{display:block;color:var(--muted);font-size:11px;letter-spacing:.6px}
+  .metric b{font-size:20px;font-variant-numeric:tabular-nums}
+  .metric i{font-style:normal;color:var(--muted);font-size:11px;margin-left:2px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px 20px;margin-bottom:16px}
+  .panel h2{margin:0 0 12px;font-size:13px;color:var(--muted);font-weight:600;letter-spacing:.8px}
+  .feature{display:grid;grid-template-columns:92px 1fr 130px;gap:12px;align-items:center;
+           padding:7px 0;border-bottom:1px dashed rgba(30,38,50,.7)}
+  .feature:last-child{border-bottom:0}
+  .feature .name{font-weight:600;font-size:13px}
+  .bar{height:8px;background:#0b1119;border-radius:999px;overflow:hidden;position:relative}
+  .bar i{display:block;height:100%;background:var(--accent);width:0%;
+         transition:width .25s ease}
+  .feature.hold .bar i{background:var(--bad)}
+  .feature .vals{text-align:right;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+  canvas{display:block;width:100%;height:220px}
+  .controls{display:flex;gap:12px;flex-wrap:wrap}
+  button{font:inherit;cursor:pointer;border-radius:12px;border:1px solid var(--line);
+         background:#0e141c;color:var(--text);padding:14px 22px}
+  button:hover{border-color:#2a3546}
+  button.primary{background:rgba(45,212,191,.12);border-color:rgba(45,212,191,.45);color:var(--accent);
+                 font-size:16px;font-weight:700;flex:1;min-width:240px}
+  button.primary.active{background:rgba(248,113,113,.12);border-color:rgba(248,113,113,.5);color:var(--bad)}
+  kbd{font:inherit;font-size:11px;color:var(--muted);border:1px solid var(--line);
+      border-radius:6px;padding:1px 6px;margin-left:6px}
+  #labels{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+  #labels li{display:flex;justify-content:space-between;color:var(--muted);font-size:12.5px}
+  #labels b{color:var(--text);font-weight:600}
+  .empty{color:var(--muted);font-size:12.5px}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>PPG 憋气识别 <span class="tag">MAX30102</span></h1>
+    <p class="hint">先正常呼吸约 20 秒（calibrating → normal），按 <b>空格</b> 标记开始憋气，松口后再按一次标记恢复。</p>
+  </div>
+  <div class="badge" id="conn">连接中…</div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="score-wrap">
+      <div id="score">0.00</div>
+      <div class="score-label">HOLD SCORE</div>
+    </div>
+    <div id="state" class="warming">warming</div>
+    <div class="metrics">
+      <div class="metric"><span>HR</span><b id="hr">--</b><i>bpm</i></div>
+      <div class="metric"><span>SpO2</span><b id="spo2">--</b><i>%</i></div>
+      <div class="metric"><span>PI</span><b id="pi">--</b><i>%</i></div>
+      <div class="metric"><span>SQI</span><b id="sqi">--</b><i></i></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>呼吸调制特征（当前 / 基线）</h2>
+    <div id="features"></div>
+  </section>
+
+  <section class="panel">
+    <h2>分数曲线（最近 90 秒，虚线 = 触发阈值）</h2>
+    <canvas id="chart"></canvas>
+  </section>
+
+  <section class="panel controls">
+    <button id="toggle" class="primary">开始憋气 <kbd>Space</kbd></button>
+    <button id="recal">重新标定</button>
+  </section>
+
+  <section class="panel">
+    <h2>人工标记 <span id="labelCount" class="empty"></span></h2>
+    <ul id="labels"><li class="empty">还没有标记</li></ul>
+  </section>
+</main>
+
+<script>
+(function(){
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const FEATURES = [
+    ["resp_mod", "resp_mod", "呼吸基线调制"],
+    ["rsa", "rsa", "RSA 心率变异"],
+    ["pwa", "pwa", "脉搏振幅调制"]
+  ];
+  const state = { t: 0, score: 0, threshold: 0.55, state: "warming", labels: 0, inHold: false };
+  const history = [];           // {t, score, state}
+  let lastOk = 0;
+  let featureNodes = {};
+  let pollTimer = null;
+
+  function fmt(v, d){
+    if(v === null || v === undefined || Number.isNaN(v)) return "--";
+    return Number(v).toFixed(d);
+  }
+
+  function buildFeatureRows(){
+    const host = $("features");
+    host.innerHTML = "";
+    featureNodes = {};
+    FEATURES.forEach(function(item){
+      const key = item[0];
+      const row = document.createElement("div");
+      row.className = "feature";
+      row.innerHTML = '<div class="name">' + item[2] + '</div>' +
+        '<div class="bar"><i></i></div>' +
+        '<div class="vals">-- / --</div>';
+      host.appendChild(row);
+      featureNodes[key] = { row: row, bar: row.querySelector("i"), vals: row.querySelector(".vals") };
+    });
+  }
+
+  function render(payload){
+    state.t = payload.t || 0;
+    state.score = payload.score || 0;
+    state.threshold = payload.threshold || 0.55;
+    state.state = payload.state || "warming";
+    state.labels = payload.label_count || 0;
+
+    $("score").textContent = fmt(state.score, 2);
+    const badge = $("state");
+    badge.textContent = state.state;
+    badge.className = state.state;
+
+    $("hr").textContent = fmt(payload.hr, 0);
+    $("spo2").textContent = fmt(payload.spo2, 1);
+    $("pi").textContent = payload.pi === null || payload.pi === undefined ? "--" : Number(payload.pi).toFixed(2);
+    $("sqi").textContent = fmt(payload.sqi, 2);
+
+    const features = payload.features || {};
+    const baseline = payload.baseline || null;
+    FEATURES.forEach(function(item){
+      const key = item[0];
+      const node = featureNodes[key];
+      if(!node) return;
+      const value = features[key];
+      const base = baseline ? baseline[key] : null;
+      const ratio = (value !== null && value !== undefined && base) ? Math.min(1, value / base) : 0;
+      node.bar.style.width = (ratio * 100).toFixed(1) + "%";
+      node.row.classList.toggle("hold", state.state === "hold");
+      node.vals.textContent = (value === null || value === undefined ? "--" : Number(value).toFixed(3)) +
+                              " / " + (base ? Number(base).toFixed(2) : "--");
+    });
+
+    const last = history[history.length - 1];
+    if(!last || Math.abs(last.t - state.t) > 1e-6){
+      history.push({ t: state.t, score: state.score, state: state.state });
+      if(history.length > 600) history.shift();
+    }
+    renderLabels(payload.labels || []);
+    drawChart();
+  }
+
+  function renderLabels(labels){
+    $("labelCount").textContent = state.labels ? "（共 " + state.labels + " 条）" : "";
+    const host = $("labels");
+    if(!labels.length){ host.innerHTML = '<li class="empty">还没有标记</li>'; return; }
+    const names = { hold_start: "开始憋气", hold_end: "恢复呼吸",
+                    normal_start: "正常呼吸开始", normal_end: "正常呼吸结束" };
+    host.innerHTML = labels.slice().reverse().map(function(item){
+      return '<li><span>' + (names[item.event] || item.event) + '</span>' +
+             '<b>t=' + Number(item.t).toFixed(1) + 's · score ' + Number(item.score).toFixed(2) + '</b></li>';
+    }).join("");
+  }
+
+  function drawChart(){
+    const canvas = $("chart");
+    const dpr = window.devicePixelRatio || 1;
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if(canvas.width !== Math.round(width * dpr)){
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+
+    const pad = { l: 34, r: 8, t: 10, b: 18 };
+    const plotW = width - pad.l - pad.r;
+    const plotH = height - pad.t - pad.b;
+    const tMax = Math.max(90, state.t);
+    const tMin = tMax - 90;
+    const x = t => pad.l + (t - tMin) / 90 * plotW;
+    const y = v => pad.t + (1 - Math.max(0, Math.min(1, v))) * plotH;
+
+    ctx.strokeStyle = "#1e2632";
+    ctx.lineWidth = 1;
+    for(let i = 0; i <= 4; i++){
+      const gy = pad.t + plotH * i / 4;
+      ctx.beginPath(); ctx.moveTo(pad.l, gy); ctx.lineTo(width - pad.r, gy); ctx.stroke();
+    }
+    ctx.fillStyle = "#5c6674";
+    ctx.font = "10px monospace";
+    [0, 0.5, 1].forEach(function(v){
+      ctx.fillText(v.toFixed(1), 4, y(v) + 3);
+    });
+
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = "#f5b942";
+    ctx.beginPath(); ctx.moveTo(pad.l, y(state.threshold)); ctx.lineTo(width - pad.r, y(state.threshold)); ctx.stroke();
+    ctx.setLineDash([]);
+
+    const points = history.filter(p => p.t >= tMin);
+    for(let i = 1; i < points.length; i++){
+      if(points[i].state === "hold"){
+        ctx.fillStyle = "rgba(248,113,113,.10)";
+        ctx.fillRect(x(points[i-1].t), pad.t, Math.max(1, x(points[i].t) - x(points[i-1].t)), plotH);
+      }
+    }
+
+    ctx.strokeStyle = "#2dd4bf";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let started = false;
+    points.forEach(function(p){
+      const px = x(p.t), py = y(p.score);
+      if(!started){ ctx.moveTo(px, py); started = true; } else { ctx.lineTo(px, py); }
+    });
+    ctx.stroke();
+
+    if(points.length){
+      const last = points[points.length - 1];
+      ctx.fillStyle = last.state === "hold" ? "#f87171" : "#2dd4bf";
+      ctx.beginPath(); ctx.arc(x(last.t), y(last.score), 3.5, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  async function postJSON(url, body){
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
+    });
+    if(!response.ok) throw new Error("HTTP " + response.status);
+    return response.json();
+  }
+
+  async function poll(){
+    try{
+      const response = await fetch("/api/state", { cache: "no-store" });
+      if(!response.ok) throw new Error("HTTP " + response.status);
+      render(await response.json());
+      lastOk = Date.now();
+      const badge = $("conn");
+      badge.textContent = "已连接";
+      badge.className = "badge on";
+    }catch(error){
+      if(Date.now() - lastOk > 2000){
+        const badge = $("conn");
+        badge.textContent = "连接断开";
+        badge.className = "badge off";
+      }
+    }
+  }
+
+  function setHold(active){
+    state.inHold = active;
+    const button = $("toggle");
+    button.classList.toggle("active", active);
+    button.innerHTML = active ? '恢复呼吸 <kbd>Space</kbd>' : '开始憋气 <kbd>Space</kbd>';
+  }
+
+  async function toggleHold(){
+    const event = state.inHold ? "hold_end" : "hold_start";
+    try{
+      await postJSON("/api/label", { event: event });
+      setHold(!state.inHold);
+      poll();
+    }catch(error){
+      const badge = $("conn");
+      badge.textContent = "标记失败";
+      badge.className = "badge off";
+    }
+  }
+
+  $("toggle").addEventListener("click", toggleHold);
+  $("recal").addEventListener("click", async function(){
+    try{ await postJSON("/api/calibrate", {}); }catch(error){}
+  });
+
+  document.addEventListener("keydown", function(event){
+    if(event.code === "Space" || event.key === " "){
+      event.preventDefault();
+      toggleHold();
+    }
+  });
+
+  buildFeatureRows();
+  fetch("/api/history", { cache: "no-store" })
+    .then(r => r.json())
+    .then(data => {
+      (data.records || []).forEach(function(p){ history.push(p); });
+      drawChart();
+    })
+    .catch(function(){});
+  poll();
+  pollTimer = setInterval(poll, 250);
+  window.addEventListener("resize", drawChart);
+})();
+</script>
+</body>
+</html>

@@ -18,7 +18,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, Optional, Protocol, Tuple
 
 import numpy as np
 
@@ -94,6 +94,7 @@ class Monitor:
         hold_detector: Any = None,
         jsonl_path: Optional[str] = None,
         threaded: Optional[bool] = None,
+        on_record: Optional[Callable[[Dict[str, Any], Dict[str, Any]], None]] = None,
     ) -> None:
         self.device = device
         self.fs = float(fs)
@@ -117,6 +118,7 @@ class Monitor:
         # Hardware runs threaded so a slow analysis cannot starve the FIFO.
         # Simulated runs keep the single-threaded, deterministic path.
         self.threaded = bool(threaded) if threaded is not None else (clock is None)
+        self.on_record = on_record
         self._lock = threading.Lock()
         self._running = False
 
@@ -282,6 +284,12 @@ class Monitor:
                 ]
             self._summary_writer.writerow(row)
             self._summary_file.flush()
+
+        if self.on_record is not None and hold_record is not None:
+            try:
+                self.on_record(result, hold_record)
+            except Exception:
+                LOGGER.exception("on_record callback failed")
 
         if not self.quiet:
             if not result["finger"]:

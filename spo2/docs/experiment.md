@@ -209,3 +209,22 @@ CSV 在原有 SpO2 列后追加 `hold_state,hold_score,resp_mod,rsa,pwa,hr_delta
 - 基线必须在正常呼吸时采集；标定期就在憋气会让阈值失效。
 - 手指移动、按压变化会污染 `resp_mod`，SQI 门控只能挡掉一部分。
 - 心率下降（`hr_delta`）只作为特征输出，不参与打分：个体差异太大。
+
+### 11.6 网页打标（用真实标签调阈值）
+
+阈值和权重不能只靠仿真定。`oxy web` 起一个无依赖的网页（默认 8001 端口）：
+实时显示 score/state/HR/SpO2/PI 和三项特征，按**空格**标记"开始憋气"，松口再按一次
+标记"恢复呼吸"。每次按键把 `monotonic_s, event, state, score, hr, spo2, resp_mod,
+rsa, pwa` 写进 `data/labels.csv`。
+
+采集结束后：
+
+```bash
+python3 scripts/evaluate_labels.py --labels data/labels.csv --timeline data/hold_web_*.csv
+```
+
+输出每段憋气的检出延迟、漏检、误报秒数，并对 `enter_score`（0.45–0.75）做离线状态机
+replay，给出推荐阈值。标签是人工真值，比"看曲线拍脑袋"可靠得多。
+
+建议流程：正常呼吸 25 s → 按空格 → 憋气 20–30 s → 再按空格 → 正常呼吸 20 s，
+重复 5 次。5 组 labels 足够把阈值和三项权重定下来，然后再谈麦克风/摄像头的加权融合。

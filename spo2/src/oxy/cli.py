@@ -32,6 +32,7 @@ from . import __version__, dsp, plotting, simulate
 from .config import load_config
 from .monitor import Monitor
 from .resp import PPGBreathHoldDetector
+from .web import HoldWebApp
 
 EXIT_OK = 0
 EXIT_HARDWARE = 2
@@ -681,6 +682,99 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    coeffs, calibration_path = _load_coeffs(config)
+    fs = float(config["acq"]["sample_rate"])
+    poll = float(config["acq"]["poll_interval_s"])
+
+    detector = PPGBreathHoldDetector(
+        fs=fs,
+        calib_s=args.calib,
+        min_sqi=float(config["dsp"]["min_sqi"]),
+        finger_dc_ir=float(config["dsp"]["finger_dc_ir"]),
+        min_pi=float(config["dsp"]["min_pi_pct"]),
+        max_pi=float(config["dsp"]["max_pi_pct"]),
+        coeffs=coeffs,
+    )
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_path = args.out or os.path.join(config["output"]["dir"], "hold_web_%s.csv" % stamp)
+    root, _ = os.path.splitext(summary_path)
+    jsonl_path = root + ".jsonl"
+    labels_path = args.labels or os.path.join(config["output"]["dir"], "labels.csv")
+
+    app = HoldWebApp(
+        labels_path=labels_path,
+        threshold=detector.enter_score,
+        on_recalibrate=detector.reset_baseline,
+    )
+
+    if args.simulate:
+        duration = args.duration or 120.0
+        length = max(duration, (args.hold_start or 0.0) + args.hold_dur + 20.0, 60.0)
+        recording = simulate.generate(
+            duration_s=length,
+            fs=fs,
+            hr=args.hr,
+            spo2=args.spo2,
+            seed=args.seed,
+            hold_start=args.hold_start,
+            hold_duration=args.hold_dur,
+        )
+        device = simulate.FakeDevice(recording, int(round(poll * fs)))
+        print("仿真模式：模拟憋气 %.0f-%.0f s" % (args.hold_start or 0, (args.hold_start or 0) + args.hold_dur))
+    else:
+        from .driver import MAX30102
+
+        try:
+            device = MAX30102(
+                bus=int(config["i2c"]["bus"]),
+                address=int(config["i2c"]["address"]),
+                sample_rate=int(config["acq"]["sample_rate"]),
+                led_red=int(config["led"]["current_red"]),
+                led_ir=int(config["led"]["current_ir"]),
+            )
+        except RuntimeError as exc:
+            print("ERROR: %s" % exc)
+            return EXIT_HARDWARE
+        duration = args.duration
+
+    monitor = Monitor(
+        device,
+        fs=fs,
+        window_s=float(config["dsp"]["window_s"]),
+        poll_interval_s=poll,
+        emit_interval_s=float(config["output"]["emit_interval_s"]),
+        coeffs=coeffs,
+        min_sqi=float(config["dsp"]["min_sqi"]),
+        finger_dc_ir=float(config["dsp"]["finger_dc_ir"]),
+        min_pi=float(config["dsp"]["min_pi_pct"]),
+        max_pi=float(config["dsp"]["max_pi_pct"]),
+        hr_min=float(config["dsp"]["hr_min"]),
+        hr_max=float(config["dsp"]["hr_max"]),
+        summary_path=summary_path,
+        jsonl_path=jsonl_path,
+        quiet=True,
+        hold_detector=detector,
+        on_record=app.publish,
+    )
+
+    server = app.serve(args.host, args.port)
+    if calibration_path:
+        print("using calibration curve from %s" % calibration_path)
+    print("前端:   http://<树莓派IP>:%d" % args.port)
+    print("标签:   %s" % labels_path)
+    print("汇总:   %s" % summary_path)
+    print("按空格标记开始/结束憋气，Ctrl-C 停止。")
+    try:
+        monitor.run(duration)
+    finally:
+        device.close()
+        server.shutdown()
+    return EXIT_OK
+
+
 def cmd_plot(args: argparse.Namespace) -> int:
     output = plotting.plot_summary(args.csv, args.out, title=args.title)
     print("wrote %s" % output)
@@ -738,6 +832,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     selftest = subparsers.add_parser("selftest", help="verify the pipeline without hardware")
     selftest.set_defaults(func=cmd_selftest)
+
+    web = subparsers.add_parser("web", help="browser UI with manual hold labels")
+    web.add_argument("--host", default="0.0.0.0")
+    web.add_argument("--port", type=int, default=8001)
+    web.add_argument("--out", help="summary CSV path")
+    web.add_argument("--labels", help="label CSV path")
+    web.add_argument("--duration", type=float, default=0.0)
+    web.add_argument("--calib", type=float, default=20.0)
+    web.add_argument("--simulate", action="store_true", help="run on synthetic data")
+    web.add_argument("--hr", type=float, default=72.0)
+    web.add_argument("--spo2", type=float, default=97.0)
+    web.add_argument("--hold-start", type=float, default=40.0)
+    web.add_argument("--hold-dur", type=float, default=20.0)
+    web.add_argument("--seed", type=int, default=5)
+    web.set_defaults(func=cmd_web)
 
     hold = subparsers.add_parser("hold", help="PPG-only breath-hold detection (live)")
     hold.add_argument("--out", help="summary CSV path")
