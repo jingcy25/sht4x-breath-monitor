@@ -30,6 +30,7 @@ import numpy as np
 from . import __version__, dsp, plotting, simulate
 from .config import load_config
 from .monitor import Monitor
+from .resp import PPGBreathHoldDetector
 
 EXIT_OK = 0
 EXIT_HARDWARE = 2
@@ -122,9 +123,12 @@ def cmd_diag(args: argparse.Namespace) -> int:
     bus = int(config["i2c"]["bus"])
 
     print("I2C bus %d scan" % bus)
-    if shutil.which("i2cdetect"):
+    scanner = shutil.which("i2cdetect") or (
+        "/usr/sbin/i2cdetect" if os.path.exists("/usr/sbin/i2cdetect") else None
+    )
+    if scanner:
         try:
-            subprocess.run(["i2cdetect", "-y", str(bus)], check=False)
+            subprocess.run([scanner, "-y", str(bus)], check=False)
         except OSError as exc:
             print("  could not run i2cdetect: %s" % exc)
     else:
@@ -301,6 +305,167 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     return EXIT_OK if stats["valid"] else EXIT_NO_DATA
 
 
+def cmd_hold(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    coeffs, calibration_path = _load_coeffs(config)
+    fs = float(config["acq"]["sample_rate"])
+
+    from .driver import MAX30102
+
+    try:
+        device = MAX30102(
+            bus=int(config["i2c"]["bus"]),
+            address=int(config["i2c"]["address"]),
+            sample_rate=int(config["acq"]["sample_rate"]),
+            led_red=int(config["led"]["current_red"]),
+            led_ir=int(config["led"]["current_ir"]),
+        )
+    except RuntimeError as exc:
+        print("ERROR: %s" % exc)
+        return EXIT_HARDWARE
+
+    detector = PPGBreathHoldDetector(
+        fs=fs,
+        calib_s=args.calib,
+        min_sqi=float(config["dsp"]["min_sqi"]),
+        finger_dc_ir=float(config["dsp"]["finger_dc_ir"]),
+        min_pi=float(config["dsp"]["min_pi_pct"]),
+        max_pi=float(config["dsp"]["max_pi_pct"]),
+        coeffs=coeffs,
+    )
+
+    summary_path = args.out or os.path.join(
+        config["output"]["dir"], "hold_%s.csv" % datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
+    root, _ = os.path.splitext(summary_path)
+    jsonl_path = args.jsonl or (root + ".jsonl")
+    raw_path = None if args.no_raw else _derive_raw_path(summary_path)
+
+    monitor = Monitor(
+        device,
+        fs=fs,
+        window_s=float(config["dsp"]["window_s"]),
+        poll_interval_s=float(config["acq"]["poll_interval_s"]),
+        emit_interval_s=float(config["output"]["emit_interval_s"]),
+        coeffs=coeffs,
+        min_sqi=float(config["dsp"]["min_sqi"]),
+        finger_dc_ir=float(config["dsp"]["finger_dc_ir"]),
+        min_pi=float(config["dsp"]["min_pi_pct"]),
+        max_pi=float(config["dsp"]["max_pi_pct"]),
+        hr_min=float(config["dsp"]["hr_min"]),
+        hr_max=float(config["dsp"]["hr_max"]),
+        summary_path=summary_path,
+        raw_path=raw_path,
+        quiet=args.quiet,
+        hold_detector=detector,
+        jsonl_path=jsonl_path,
+    )
+
+    print("PPG 单独憋气识别（仅 MAX30102）")
+    if calibration_path:
+        print("using calibration curve from %s" % calibration_path)
+    print("步骤：先正常呼吸约 %d 秒建立基线，看到 normal 后再憋气。" % args.calib)
+    print("检测延迟约 10-15 秒；注意贴紧手指、保持不动、遮光。")
+    print("summary -> %s" % summary_path)
+    print("jsonl   -> %s" % jsonl_path)
+    if raw_path:
+        print("raw     -> %s" % raw_path)
+    print("Ctrl-C to stop.\n")
+
+    try:
+        stats = monitor.run(args.duration)
+    finally:
+        device.close()
+
+    print("\nsession finished")
+    _print_stats(stats)
+    print(
+        "hold state active for %d s, transitions: %s"
+        % (stats.get("hold_seconds", 0), stats.get("hold_transitions", []))
+    )
+    return EXIT_OK if stats["valid"] else EXIT_NO_DATA
+
+
+def cmd_hold_sim(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    coeffs, _ = _load_coeffs(config)
+    fs = float(config["acq"]["sample_rate"])
+
+    recording = simulate.generate(
+        duration_s=args.duration,
+        fs=fs,
+        hr=args.hr,
+        spo2=args.spo2,
+        seed=args.seed,
+        hold_start=args.hold_start,
+        hold_duration=args.hold_dur,
+        hold_hr_drop=args.hr_drop,
+        noise_counts=args.noise,
+    )
+
+    detector = PPGBreathHoldDetector(
+        fs=fs,
+        calib_s=args.calib,
+        min_sqi=float(config["dsp"]["min_sqi"]),
+        finger_dc_ir=float(config["dsp"]["finger_dc_ir"]),
+        min_pi=float(config["dsp"]["min_pi_pct"]),
+        max_pi=float(config["dsp"]["max_pi_pct"]),
+        coeffs=coeffs,
+    )
+
+    summary_path = args.out or os.path.join(config["output"]["dir"], "hold_simulation.csv")
+    root, _ = os.path.splitext(summary_path)
+    jsonl_path = root + ".jsonl"
+
+    monitor = Monitor(
+        simulate.FakeDevice(recording, int(round(float(config["acq"]["poll_interval_s"]) * fs))),
+        fs=fs,
+        window_s=float(config["dsp"]["window_s"]),
+        poll_interval_s=float(config["acq"]["poll_interval_s"]),
+        emit_interval_s=float(config["output"]["emit_interval_s"]),
+        clock=simulate.VirtualClock(),
+        coeffs=coeffs,
+        min_sqi=float(config["dsp"]["min_sqi"]),
+        finger_dc_ir=float(config["dsp"]["finger_dc_ir"]),
+        min_pi=float(config["dsp"]["min_pi_pct"]),
+        max_pi=float(config["dsp"]["max_pi_pct"]),
+        summary_path=summary_path,
+        jsonl_path=jsonl_path,
+        quiet=args.quiet,
+        hold_detector=detector,
+    )
+
+    print(
+        "simulating %.0f s: normal 0-%.0f, hold %.0f-%.0f, HR %.0f, SpO2 %.0f"
+        % (
+            args.duration,
+            args.hold_start if args.hold_start is not None else args.duration,
+            args.hold_start or 0,
+            (args.hold_start or 0) + args.hold_dur,
+            args.hr,
+            args.spo2,
+        )
+    )
+    stats = monitor.run(args.duration)
+
+    transitions = stats.get("hold_transitions", [])
+    print("transitions: %s" % transitions)
+    if args.hold_start is not None:
+        starts = [tr for tr in transitions if tr["to"] == "hold"]
+        ends = [tr for tr in transitions if tr["from"] == "hold"]
+        if starts:
+            print("detected hold at t=%.1f s (latency %.1f s)" % (starts[0]["t"], starts[0]["t"] - args.hold_start))
+        else:
+            print("hold was NOT detected")
+        if ends:
+            print("hold ended at t=%.1f s" % ends[0]["t"])
+    print("baseline: %s  hr=%s" % (detector.baseline, detector.baseline_hr))
+    print("summary -> %s" % summary_path)
+    print("jsonl   -> %s" % jsonl_path)
+    _print_stats(stats)
+    return EXIT_OK
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     coeffs, _ = _load_coeffs(config)
@@ -439,6 +604,74 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "%d valid windows (expected 0)" % empty_stats["valid"],
     )
 
+    # 4. PPG-only breath-hold detection
+    def run_hold_case(hold_start, hold_duration, duration, seed):
+        recording = simulate.generate(
+            duration_s=duration,
+            fs=fs,
+            hr=72.0,
+            spo2=97.0,
+            seed=seed,
+            hold_start=hold_start,
+            hold_duration=hold_duration,
+        )
+        detector = PPGBreathHoldDetector(
+            fs=fs,
+            calib_s=20.0,
+            min_sqi=float(config["dsp"]["min_sqi"]),
+            finger_dc_ir=float(config["dsp"]["finger_dc_ir"]),
+            min_pi=float(config["dsp"]["min_pi_pct"]),
+            max_pi=float(config["dsp"]["max_pi_pct"]),
+            coeffs=coeffs,
+        )
+        monitor = Monitor(
+            simulate.FakeDevice(recording, int(round(poll * fs))),
+            fs=fs,
+            window_s=float(config["dsp"]["window_s"]),
+            poll_interval_s=poll,
+            emit_interval_s=float(config["output"]["emit_interval_s"]),
+            clock=simulate.VirtualClock(),
+            coeffs=coeffs,
+            min_sqi=float(config["dsp"]["min_sqi"]),
+            finger_dc_ir=float(config["dsp"]["finger_dc_ir"]),
+            min_pi=float(config["dsp"]["min_pi_pct"]),
+            max_pi=float(config["dsp"]["max_pi_pct"]),
+            quiet=True,
+            hold_detector=detector,
+        )
+        return monitor.run(duration)
+
+    hold_stats = run_hold_case(40.0, 25.0, 95.0, 5)
+    transitions = hold_stats.get("hold_transitions", [])
+    starts = [item for item in transitions if item["to"] == "hold"]
+    ends = [item for item in transitions if item["from"] == "hold"]
+    detected_at = starts[0]["t"] if starts else None
+    ended_at = ends[0]["t"] if ends else None
+    check(
+        "PPG hold detection",
+        detected_at is not None and 40.0 <= detected_at <= 62.0,
+        "first hold at %s, end at %s"
+        % ("--" if detected_at is None else "t=%.0fs" % detected_at,
+           "--" if ended_at is None else "t=%.0fs" % ended_at),
+    )
+    check(
+        "PPG hold release",
+        ended_at is not None and ended_at <= 80.0,
+        "returned to non-hold at %s"
+        % ("--" if ended_at is None else "t=%.0fs" % ended_at),
+    )
+
+    quiet_stats = run_hold_case(None, 0.0, 70.0, 9)
+    quiet_hold_events = [
+        item for item in quiet_stats.get("hold_transitions", []) if item["to"] == "hold"
+    ]
+    check(
+        "PPG no false hold",
+        len(quiet_hold_events) == 0,
+        "%d false hold entries in %d state changes"
+        % (len(quiet_hold_events), len(quiet_stats.get("hold_transitions", []))),
+    )
+
     print("")
     if failures:
         print("SELFTEST FAILED: %s" % ", ".join(failures))
@@ -504,6 +737,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     selftest = subparsers.add_parser("selftest", help="verify the pipeline without hardware")
     selftest.set_defaults(func=cmd_selftest)
+
+    hold = subparsers.add_parser("hold", help="PPG-only breath-hold detection (live)")
+    hold.add_argument("--out", help="summary CSV path")
+    hold.add_argument("--jsonl", help="per-second JSONL stream for fusion")
+    hold.add_argument("--no-raw", action="store_true")
+    hold.add_argument("--duration", type=float, default=0.0)
+    hold.add_argument("--calib", type=float, default=20.0, help="baseline seconds")
+    hold.add_argument("--quiet", action="store_true")
+    hold.set_defaults(func=cmd_hold)
+
+    hold_sim = subparsers.add_parser("hold-sim", help="verify breath-hold detection offline")
+    hold_sim.add_argument("--duration", type=float, default=95.0)
+    hold_sim.add_argument("--hold-start", type=float, default=40.0)
+    hold_sim.add_argument("--hold-dur", type=float, default=30.0)
+    hold_sim.add_argument("--hr", type=float, default=72.0)
+    hold_sim.add_argument("--spo2", type=float, default=97.0)
+    hold_sim.add_argument("--hr-drop", type=float, default=4.0)
+    hold_sim.add_argument("--noise", type=float, default=40.0)
+    hold_sim.add_argument("--calib", type=float, default=20.0)
+    hold_sim.add_argument("--seed", type=int, default=5)
+    hold_sim.add_argument("--out", default=None)
+    hold_sim.add_argument("--quiet", action="store_true")
+    hold_sim.set_defaults(func=cmd_hold_sim)
 
     plot = subparsers.add_parser("plot", help="render a summary CSV to PNG")
     plot.add_argument("csv")

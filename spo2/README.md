@@ -83,8 +83,23 @@ t=  13.0s  HR=-- bpm  SpO2=--%    PI=--%     SQI=0.31  red=   512 ir=   604  [NO
 | `oxy monitor` | 实时采集 |
 | `oxy simulate` | 合成数据跑完整链路（无硬件） |
 | `oxy replay RAW.csv` | 对原始 CSV 重新跑 DSP |
-| `oxy selftest` | 无硬件自检 |
+| `oxy selftest` | 无硬件自检（含憋气识别用例） |
+| `oxy hold` | **PPG 单独憋气识别**（实时，输出 CSV + JSONL） |
+| `oxy hold-sim` | 仿真验证憋气识别（无硬件） |
 | `oxy plot SUM.csv OUT.png` | 画 4 联图 |
+
+## 憋气识别（仅 PPG）
+
+```bash
+# 先正常呼吸约 20 s 建立基线，再憋气
+PYTHONPATH=src python3 -m oxy.cli hold --out data/hold.csv --jsonl data/hold.jsonl
+
+# 无硬件验证：0-40s 正常，40-65s 憋气
+PYTHONPATH=src python3 -m oxy.cli hold-sim --hold-start 40 --hold-dur 25
+```
+
+每秒输出一条 JSONL，字段 `state / score / confidence / features / drops`，可直接给
+后续多设备加权融合使用。原理、打分公式与局限见 `docs/experiment.md` 第 11 节。
 
 ## 目录
 
@@ -92,8 +107,9 @@ t=  13.0s  HR=-- bpm  SpO2=--%    PI=--%     SQI=0.31  red=   512 ir=   604  [NO
 config.yaml              所有可调参数（校验后才会生效）
 src/oxy/driver.py        MAX30102 寄存器驱动
 src/oxy/dsp.py           滤波 / R 比值 / SpO2 / HR / PI / SQI
-src/oxy/monitor.py       采集循环 + CSV
-src/oxy/simulate.py      合成 PPG + 假设备 + 虚拟时钟
+src/oxy/resp.py          PPG 单独憋气识别（resp_mod / RSA / PWA）
+src/oxy/monitor.py       采集循环 + CSV + JSONL
+src/oxy/simulate.py      合成 PPG（含呼吸调制与憋气段）
 src/oxy/cli.py           命令行入口
 scripts/                 诊断 / 画图 / 标定
 docs/experiment.md       实验方案、标定流程、局限与两周计划

@@ -1,43 +1,93 @@
-"""Synthetic PPG source and a fake device.
+"""Synthetic PPG source with a real respiratory component.
 
-This exists for three reasons:
+The waveform is phase-modulated by an instantaneous heart rate, so it carries
+the three signals a breath-hold detector actually needs:
 
-1. the DSP pipeline can be verified on a laptop with no sensor attached;
-2. the self-test can assert that a known heart rate and SpO2 are recovered;
-3. demos can be prepared without a finger on the sensor.
+* respiratory baseline modulation (~0.25 Hz) on the DC level
+* respiratory sinus arrhythmia (RSA) on the heart rate
+* pulse amplitude modulation (PWA) on the cardiac envelope
 
-The generated waveform is a two-bump cardiac template (systolic peak plus
-dicrotic wave) modulated by respiration, which is the shape a reflective finger
-PPG actually has. Amplitudes are chosen so the recovered R ratio lands on the
-requested SpO2.
+A ``hold_start`` / ``hold_duration`` pair fades all three out and adds a small
+bradycardia, which is what a voluntary breath hold looks like in PPG.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from . import dsp
 
 
-def pulse_template(count: int, fs: float, hr: float) -> np.ndarray:
-    """Normalised, zero-mean cardiac waveform (unit standard deviation)."""
-    time_axis = np.arange(count, dtype=float) / fs
-    period = 60.0 / hr
-    phase = (time_axis % period) / period
-
-    waveform = (
-        0.75 * np.exp(-0.5 * ((phase - 0.22) / 0.075) ** 2)
-        + 0.30 * np.exp(-0.5 * ((phase - 0.50) / 0.110) ** 2)
-        + 0.08 * np.exp(-0.5 * ((phase - 0.75) / 0.080) ** 2)
+def pulse_shape(phase: np.ndarray) -> np.ndarray:
+    """Cardiac morphology as a function of beat phase in [0, 1)."""
+    wrapped = np.mod(np.asarray(phase, dtype=float), 1.0)
+    return (
+        0.75 * np.exp(-0.5 * ((wrapped - 0.22) / 0.075) ** 2)
+        + 0.30 * np.exp(-0.5 * ((wrapped - 0.50) / 0.110) ** 2)
+        + 0.08 * np.exp(-0.5 * ((wrapped - 0.75) / 0.080) ** 2)
     )
-    waveform = waveform - waveform.mean()
-    scale = float(waveform.std())
+
+
+def _normalise(shape: np.ndarray) -> np.ndarray:
+    centred = shape - float(np.mean(shape))
+    scale = float(np.std(centred))
     if scale <= 0.0:
-        return np.zeros(count, dtype=float)
-    return waveform / scale
+        return np.zeros_like(centred)
+    return centred / scale
+
+
+def pulse_template(count: int, fs: float, hr: float) -> np.ndarray:
+    """Constant-rate template, kept for callers that only need the shape."""
+    time_axis = np.arange(count, dtype=float) / fs
+    return _normalise(pulse_shape((time_axis * hr / 60.0) % 1.0))
+
+
+def _hold_envelope(
+    time_axis: np.ndarray,
+    hold_start: Optional[float],
+    hold_duration: float,
+    ramp_s: float = 3.0,
+) -> np.ndarray:
+    if hold_start is None or hold_duration <= 0.0:
+        return np.zeros_like(time_axis)
+    rising = np.tanh((time_axis - hold_start) / ramp_s)
+    falling = np.tanh((time_axis - (hold_start + hold_duration)) / ramp_s)
+    return 0.5 * (rising - falling)
+
+
+def _spo2_trajectory(
+    time_axis: np.ndarray,
+    hold_start: Optional[float],
+    hold_duration: float,
+    spo2: float,
+    hold_spo2_drop: float,
+) -> np.ndarray:
+    if hold_start is None or hold_duration <= 0.0 or hold_spo2_drop <= 0.0:
+        return np.full_like(time_axis, spo2)
+
+    elapsed = time_axis - hold_start
+    during = (time_axis >= hold_start) & (time_axis < hold_start + hold_duration)
+    after = time_axis >= hold_start + hold_duration
+
+    drop = np.zeros_like(time_axis)
+    drop[during] = np.clip((elapsed[during] - 18.0) / 15.0, 0.0, 1.0)
+    end_value = float(np.clip((hold_duration - 18.0) / 15.0, 0.0, 1.0))
+    drop[after] = end_value * np.exp(
+        -(time_axis[after] - (hold_start + hold_duration)) / 12.0
+    )
+    return np.clip(spo2 - hold_spo2_drop * drop, 70.0, 99.9)
+
+
+def _r_from_spo2_array(spo2_values: np.ndarray) -> np.ndarray:
+    a, b, c = dsp.DEFAULT_COEFFS
+    discriminant = b * b - 4.0 * a * (c - spo2_values)
+    root = np.sqrt(np.maximum(discriminant, 0.0))
+    first = (-b + root) / (2.0 * a)
+    second = (-b - root) / (2.0 * a)
+    return np.maximum(first, second)
 
 
 def generate(
@@ -51,13 +101,16 @@ def generate(
     dc_red: float = 60000.0,
     seed: int = 7,
     finger: bool = True,
+    resp_hz: float = 0.25,
+    resp_depth: float = 0.012,
+    rsa_bpm: float = 3.5,
+    pwa_depth: float = 0.15,
+    hold_start: Optional[float] = None,
+    hold_duration: float = 0.0,
+    hold_hr_drop: float = 4.0,
+    hold_spo2_drop: float = 0.0,
 ) -> Dict[str, object]:
-    """Generate a raw (red, ir) recording with known ground truth.
-
-    ``pi_ir`` is the IR perfusion index as a fraction (0.01 = 1%). The red
-    pulsatile amplitude is scaled by the R value that corresponds to ``spo2``,
-    so ``dsp.estimate_spo2`` should recover the requested value.
-    """
+    """Generate a raw (red, ir) recording with known ground truth."""
     if duration_s <= 0:
         raise ValueError("duration_s must be positive")
     if not 30.0 <= hr <= 240.0:
@@ -69,19 +122,43 @@ def generate(
     count = int(round(duration_s * fs))
     time_axis = np.arange(count, dtype=float) / fs
 
-    ratio = dsp.r_from_spo2(spo2)
-    cardiac = pulse_template(count, fs, hr)
+    hold_env = _hold_envelope(time_axis, hold_start, hold_duration)
+    respiratory_scale = 1.0 - 0.95 * hold_env
 
-    respiration = 1.0 + 0.12 * np.sin(2.0 * math.pi * 0.25 * time_axis)
-    drift = 1.0 + 0.03 * np.sin(2.0 * math.pi * 0.05 * time_axis)
+    instantaneous_hr = (
+        hr
+        + rsa_bpm * np.sin(2.0 * math.pi * resp_hz * time_axis) * respiratory_scale
+        - hold_hr_drop * hold_env
+    )
+    instantaneous_hr = np.clip(instantaneous_hr, 30.0, 240.0)
+
+    phase = np.cumsum(instantaneous_hr / 60.0) / fs
+    cardiac = _normalise(pulse_shape(phase))
+
+    amplitude = (
+        1.0
+        + pwa_depth
+        * np.sin(2.0 * math.pi * resp_hz * time_axis + 0.8)
+        * respiratory_scale
+    )
+    level = (
+        1.0
+        + resp_depth
+        * np.sin(2.0 * math.pi * resp_hz * time_axis)
+        * respiratory_scale
+    )
+
+    spo2_track = _spo2_trajectory(
+        time_axis, hold_start, hold_duration, spo2, hold_spo2_drop
+    )
+    ratio_track = _r_from_spo2_array(spo2_track)
 
     if finger:
-        ir_signal = dc_ir * respiration * drift * (1.0 + pi_ir * cardiac)
-        red_signal = dc_red * respiration * drift * (1.0 + pi_ir * ratio * cardiac)
+        ir_signal = dc_ir * level * (1.0 + pi_ir * amplitude * cardiac)
+        red_signal = dc_red * level * (1.0 + pi_ir * ratio_track * amplitude * cardiac)
         ir_noise = rng.normal(0.0, noise_counts, count)
         red_noise = rng.normal(0.0, noise_counts * 1.2, count)
     else:
-        # Open air: dark current plus a little ambient pickup.
         ir_signal = np.full(count, 600.0)
         red_signal = np.full(count, 400.0)
         ir_noise = rng.normal(0.0, 12.0, count)
@@ -96,10 +173,13 @@ def generate(
         "fs": fs,
         "hr": hr,
         "spo2": spo2,
-        "r": ratio,
+        "r": float(np.mean(ratio_track)),
         "pi_ir": pi_ir,
         "finger": finger,
         "duration_s": duration_s,
+        "hold_start": hold_start,
+        "hold_duration": hold_duration,
+        "resp_hz": resp_hz,
     }
 
 
@@ -147,5 +227,4 @@ class VirtualClock:
 
 
 def build_recording(**kwargs: object) -> Dict[str, object]:
-    """Thin alias kept for readability at call sites."""
     return generate(**kwargs)  # type: ignore[arg-type]

@@ -12,6 +12,7 @@ CSV or the analysis code:
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
 import time
@@ -40,6 +41,15 @@ SUMMARY_HEADER = [
 ]
 
 RAW_HEADER = ["timestamp_iso", "monotonic_s", "red", "ir"]
+
+HOLD_EXTRA_HEADER = [
+    "hold_state",
+    "hold_score",
+    "resp_mod",
+    "rsa",
+    "pwa",
+    "hr_delta",
+]
 
 
 class DeviceProtocol(Protocol):
@@ -80,6 +90,8 @@ class Monitor:
         raw_path: Optional[str] = None,
         raw_stride: int = 1,
         quiet: bool = False,
+        hold_detector: Any = None,
+        jsonl_path: Optional[str] = None,
     ) -> None:
         self.device = device
         self.fs = float(fs)
@@ -98,8 +110,13 @@ class Monitor:
         self.raw_path = raw_path
         self.raw_stride = max(1, int(raw_stride))
         self.quiet = quiet
+        self.hold_detector = hold_detector
+        self.jsonl_path = jsonl_path
 
-        self._maxlen = max(32, int(round(self.window_s * self.fs)))
+        required_s = self.window_s
+        if hold_detector is not None:
+            required_s = max(required_s, float(getattr(hold_detector, "slow_window_s", required_s)))
+        self._maxlen = max(32, int(round(required_s * self.fs)))
         self._red = np.zeros(0, dtype=float)
         self._ir = np.zeros(0, dtype=float)
         self._sample_count = 0
@@ -107,6 +124,8 @@ class Monitor:
         self._summary_writer = None
         self._raw_file = None
         self._raw_writer = None
+        self._jsonl_file = None
+        self._last_hold_state: Optional[str] = None
 
         self._wall_start = time.time()
         self.stats: Dict[str, Any] = {
@@ -116,6 +135,8 @@ class Monitor:
             "mean_hr": None,
             "mean_spo2": None,
             "overflow_events": 0,
+            "hold_seconds": 0,
+            "hold_transitions": [],
         }
         self._hr_sum = 0.0
         self._spo2_sum = 0.0
@@ -127,7 +148,10 @@ class Monitor:
             os.makedirs(directory, exist_ok=True)
             self._summary_file = open(self.summary_path, "w", newline="", encoding="utf-8")
             self._summary_writer = csv.writer(self._summary_file)
-            self._summary_writer.writerow(SUMMARY_HEADER)
+            header = list(SUMMARY_HEADER)
+            if self.hold_detector is not None:
+                header += HOLD_EXTRA_HEADER
+            self._summary_writer.writerow(header)
 
         if self.raw_path:
             directory = os.path.dirname(os.path.abspath(self.raw_path))
@@ -136,8 +160,13 @@ class Monitor:
             self._raw_writer = csv.writer(self._raw_file)
             self._raw_writer.writerow(RAW_HEADER)
 
+        if self.jsonl_path:
+            directory = os.path.dirname(os.path.abspath(self.jsonl_path))
+            os.makedirs(directory, exist_ok=True)
+            self._jsonl_file = open(self.jsonl_path, "w", encoding="utf-8")
+
     def _close_outputs(self) -> None:
-        for handle in (self._summary_file, self._raw_file):
+        for handle in (self._summary_file, self._raw_file, self._jsonl_file):
             if handle is not None:
                 try:
                     handle.flush()
@@ -146,6 +175,7 @@ class Monitor:
                     LOGGER.exception("failed to close output file")
         self._summary_file = None
         self._raw_file = None
+        self._jsonl_file = None
 
     def _append(self, samples: list) -> None:
         if not samples:
@@ -191,23 +221,53 @@ class Monitor:
             self._hr_sum += float(result["hr_bpm"])
             self._spo2_sum += float(result["spo2_pct"])
 
+        hold_record = None
+        if self.hold_detector is not None:
+            hold_record = self.hold_detector.update(self._red, self._ir, elapsed_s)
+            if hold_record["state"] == "hold":
+                self.stats["hold_seconds"] += 1
+            if (
+                self._last_hold_state is not None
+                and hold_record["state"] != self._last_hold_state
+            ):
+                self.stats["hold_transitions"].append(
+                    {
+                        "t": round(elapsed_s, 1),
+                        "from": self._last_hold_state,
+                        "to": hold_record["state"],
+                    }
+                )
+            self._last_hold_state = hold_record["state"]
+            if self._jsonl_file is not None:
+                self._jsonl_file.write(json.dumps(hold_record, ensure_ascii=False) + "\n")
+                self._jsonl_file.flush()
+
         if self._summary_writer is not None:
-            self._summary_writer.writerow(
-                [
-                    _iso(self._wall_start + elapsed_s),
-                    "%.3f" % elapsed_s,
-                    "" if result["hr_bpm"] is None else "%.1f" % result["hr_bpm"],
-                    "" if result["spo2_pct"] is None else "%.1f" % result["spo2_pct"],
-                    "" if result["r_ratio"] is None else "%.4f" % result["r_ratio"],
-                    "" if result["pi_pct"] is None else "%.3f" % result["pi_pct"],
-                    "%.3f" % result["sqi"],
-                    int(result["finger"]),
-                    int(result["valid"]),
-                    int(result["red_dc"]),
-                    int(result["ir_dc"]),
-                    int(result["window_samples"]),
+            row = [
+                _iso(self._wall_start + elapsed_s),
+                "%.3f" % elapsed_s,
+                "" if result["hr_bpm"] is None else "%.1f" % result["hr_bpm"],
+                "" if result["spo2_pct"] is None else "%.1f" % result["spo2_pct"],
+                "" if result["r_ratio"] is None else "%.4f" % result["r_ratio"],
+                "" if result["pi_pct"] is None else "%.3f" % result["pi_pct"],
+                "%.3f" % result["sqi"],
+                int(result["finger"]),
+                int(result["valid"]),
+                int(result["red_dc"]),
+                int(result["ir_dc"]),
+                int(result["window_samples"]),
+            ]
+            if hold_record is not None:
+                features = hold_record["features"]
+                row += [
+                    hold_record["state"],
+                    "%.3f" % hold_record["score"],
+                    _format_optional(features.get("resp_mod"), 4),
+                    _format_optional(features.get("rsa"), 3),
+                    _format_optional(features.get("pwa"), 3),
+                    _format_optional(features.get("hr_delta"), 1),
                 ]
-            )
+            self._summary_writer.writerow(row)
 
         if not self.quiet:
             if not result["finger"]:
@@ -216,20 +276,22 @@ class Monitor:
                 state = "LOW SIGNAL"
             else:
                 state = "OK"
-            print(
-                "t=%6.1fs  HR=%s bpm  SpO2=%s%%  PI=%s%%  SQI=%.2f  red=%6d ir=%6d  [%s]"
-                % (
-                    elapsed_s,
-                    _format_optional(result["hr_bpm"], 0),
-                    _format_optional(result["spo2_pct"], 1),
-                    _format_optional(result["pi_pct"], 3),
-                    result["sqi"],
-                    int(result["red_dc"]),
-                    int(result["ir_dc"]),
-                    state,
-                ),
-                flush=True,
+            line = "t=%6.1fs  HR=%s bpm  SpO2=%s%%  PI=%s%%  SQI=%.2f  red=%6d ir=%6d  [%s]" % (
+                elapsed_s,
+                _format_optional(result["hr_bpm"], 0),
+                _format_optional(result["spo2_pct"], 1),
+                _format_optional(result["pi_pct"], 3),
+                result["sqi"],
+                int(result["red_dc"]),
+                int(result["ir_dc"]),
+                state,
             )
+            if hold_record is not None:
+                line += "  HOLD=%s %s" % (
+                    _format_optional(hold_record["score"], 2),
+                    hold_record["state"],
+                )
+            print(line, flush=True)
         return result
 
     # ------------------------------------------------------------------ run

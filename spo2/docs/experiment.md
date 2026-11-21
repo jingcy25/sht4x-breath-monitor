@@ -134,3 +134,78 @@ FIFO 里有数据 → 手指放上去 `ir` 从几百跳到几万。
 - 输出：CSV 表头集中在 `monitor.py` 顶部，加列不会影响其他模块。
 
 后续只需新增一个 `MultiSourceMonitor`，复用同样的时钟与 CSV 写出逻辑。
+
+## 11. PPG 单独憋气识别
+
+`src/oxy/resp.py` + `oxy hold` 是只依赖 MAX30102 的憋气检测器，每秒输出一条
+JSONL，供后续多设备加权融合。
+
+### 11.1 为什么不用 SpO2
+
+30–45 s 憋气 SpO2 通常只降 0–2%，落在噪声里。打分只用三个呼吸调制特征：
+
+| 特征 | 物理含义 | 计算 | 静息典型值 |
+|---|---|---|---|
+| `resp_mod` | 呼吸引起的基线起伏 | IR 在 0.15–0.40 Hz 的谱峰幅度 / DC | 0.6–1.5 % |
+| `rsa` | 呼吸性窦性心律不齐 | RR 序列同带谱峰 / 平均 RR | 2–6 % |
+| `pwa` | 呼吸性脉搏振幅调制 | 每搏幅度同带谱峰 / 平均幅度 | 6–15 % |
+
+用 FFT + Hann 窗而不是低阶带通：0.15 Hz 高通在 7 s 窗口上的暂态比窗口本身还长，
+实测会让同一段憋气内的特征跳变一个数量级。
+
+### 11.2 打分与状态机
+
+先正常呼吸约 20 s 采集个人基线（各特征中位数），之后：
+
+```
+drop_i = clip(1 - current_i / max(baseline_i, floor_i), 0, 1)
+score  = 0.5*drop_resp + 0.3*drop_rsa + 0.2*drop_pwa
+```
+
+- 窗口：`resp_mod` 7 s，RSA/PWA 16 s，1 s 更新
+- 进入 hold：score ≥ 0.55 连续 2 s
+- 退出 hold：score ≤ 0.40 连续 4 s
+- 手指离开或 SQI 不足 → `no_signal`，计数器清零；重新放上后需 4 s 有效数据才允许再进
+
+仿真实测（`oxy hold-sim`）：**检出延迟 8 s**，释放后约 10 s 回到 `normal`，
+120 s 无憋气运行 0 次误报。真人延迟会更大，因为呼吸调制不是瞬间消失。
+
+### 11.3 输出（融合接口）
+
+`oxy hold --jsonl hold.jsonl` 每秒一行：
+
+```json
+{"t": 62.8, "device": "ppg", "state": "hold", "score": 0.59, "confidence": 1.0,
+ "features": {"resp_mod": 0.42, "rsa": 0.42, "pwa": 2.47,
+              "hr_bpm": 68.0, "hr_delta": -4.4, "spo2": 97.0, "sqi": 1.0, "finger": true},
+ "drops": {"resp_mod": 0.38, "rsa": 0.85, "pwa": 0.73},
+ "baseline": {"resp_mod": 1.18, "rsa": 3.59, "pwa": 10.49}, "baseline_hr": 72.4}
+```
+
+融合层建议：
+
+```
+if confidence_i < 0.4: 跳过该设备
+score_fused = Σ w_i * score_i / Σ w_i
+```
+
+`features` 保留原始量，允许按特征级加权（麦克风只看"呼吸声消失"，摄像头只看
+"胸廓静止"，PPG 用 score + hr_delta 做佐证）。
+
+### 11.4 使用
+
+```bash
+PYTHONPATH=src python3 -m oxy.cli hold --out data/hold.csv --jsonl data/hold.jsonl
+PYTHONPATH=src python3 -m oxy.cli hold-sim --hold-start 40 --hold-dur 25
+```
+
+`hold` 启动后先正常呼吸约 20 s（终端显示 `calibrating` → `normal`），再憋气。
+CSV 在原有 SpO2 列后追加 `hold_state,hold_score,resp_mod,rsa,pwa,hr_delta`。
+
+### 11.5 局限
+
+- 安静坐着不动也会降低 RSA，单靠 PPG 无法完全区分"静止"和"屏息"；这正是要融合
+  麦克风/摄像头的理由。
+- 基线必须在正常呼吸时采集；标定期就在憋气会让阈值失效。
+- 手指移动、按压变化会污染 `resp_mod`，SQI 门控只能挡掉一部分。
+- 心率下降（`hr_delta`）只作为特征输出，不参与打分：个体差异太大。
