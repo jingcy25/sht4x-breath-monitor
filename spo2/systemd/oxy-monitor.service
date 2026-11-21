@@ -1,0 +1,17 @@
+[Unit]
+Description=MAX30102 pulse oximetry monitor
+After=network.target
+
+[Service]
+Type=simple
+# Adjust User / paths to match your install.
+User=pi
+WorkingDirectory=/home/pi/iot_workflow
+Environment=PYTHONPATH=/home/pi/iot_workflow/src
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/iot_workflow/.venv/bin/python -m oxy.cli monitor --quiet
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

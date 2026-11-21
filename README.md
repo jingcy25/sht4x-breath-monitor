@@ -33,6 +33,7 @@
 | `plan.md` | 方案 |
 | `detailed-plan.md` | 详细方案（架构 / API / 数据模型 / 里程碑） |
 | `wiring-diagram.html` | 接线图 |
+| `spo2/` | MAX30102 血氧 / 心率模块（独立子项目，含仿真与自检） |
 
 ## 快速开始
 
@@ -50,3 +51,22 @@ python3 -u breath_server.py
 ## 呼吸检测原理
 
 呼气时湿度快速上升、吸气时回落。用慢速指数滑动平均估计「基线」，湿度偏离基线的幅度即「呼吸信号」；信号向上越过阈值（默认 **1.2 %RH**，需按传感器距离实测标定）记为一次呼吸；连续 20 秒无呼吸 → 报警。
+
+## 血氧 / 心率模块（MAX30102）
+
+`spo2/` 是同一块树莓派上的独立子项目：MAX30102 反射式 PPG 采集，计算 SpO2、
+心率、灌注指数（PI）与信号质量（SQI），输出 1 Hz 汇总 CSV 和 100 Hz 原始波形。
+**没有传感器也能跑**——内置合成 PPG 与自检。
+
+```bash
+cd spo2
+PYTHONPATH=src python3 -m oxy.cli selftest        # 已知 HR/SpO2 能否还原
+PYTHONPATH=src python3 -m oxy.cli monitor --out data/session.csv
+```
+
+接线、安装与命令说明见 `spo2/README.md`，实验方案与标定流程见
+`spo2/docs/experiment.md`。I2C 地址 `0x57`，与 SHT4x 的 `0x44` 不冲突，可同总线共存。
+
+> 同样**非医疗级**：MAX30102 的红外波长为 880 nm（临床常用 940 nm），datasheet
+> 未给出 SpO2 精度指标，绝对读数仅可用于教学与趋势观察。
+

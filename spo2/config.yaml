@@ -1,0 +1,33 @@
+# MAX30102 SpO2 / heart-rate monitor configuration
+# Every value here is validated on load (see src/oxy/config.py).
+
+i2c:
+  bus: 1            # /dev/i2c-1 on Raspberry Pi
+  address: 0x57     # fixed by the MAX30102 silicon
+
+led:
+  current_red: 0x24 # 0x24 * 0.2 mA = 7.2 mA per LED
+  current_ir: 0x24  # range 0x00..0xFF; raise if the signal is too weak
+
+acq:
+  sample_rate: 100  # 50, 100, 200, 400, 800, 1000, 1600, 3200
+  poll_interval_s: 0.2
+  resume_gap_s: 2.0
+
+dsp:
+  window_s: 5.0     # analysis window used for SpO2 / HR
+  min_pi_pct: 0.02  # perfusion index sanity range
+  max_pi_pct: 5.0
+  min_sqi: 0.55     # below this the reading is shown as "--"
+  finger_dc_ir: 5000  # DC counts above which a finger is assumed present
+  hr_min: 30
+  hr_max: 240
+
+spo2:
+  curve: maxim_an6409
+  calibration_path: data/calibration.json   # optional, produced by scripts/calibrate.py
+
+output:
+  dir: data
+  emit_interval_s: 1.0
+  log_raw: true     # write a 100 Hz raw CSV alongside the 1 Hz summary

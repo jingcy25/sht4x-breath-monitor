@@ -1,0 +1,20 @@
+# Raspberry Pi OS (Bookworm/Bullseye) is best served by apt for the heavy
+# scientific stack. See docs/experiment.md -- do NOT pip-compile scipy on a
+# 512 MB Pi Zero 2 W, it commonly runs out of memory.
+#
+# Recommended on the Pi:
+#   sudo apt install -y python3-numpy python3-scipy python3-smbus i2c-tools
+#   python3 -m venv --system-site-packages .venv
+#   .venv/bin/pip install smbus2 pyyaml
+#
+# This file is for laptop / CI use where apt packages are unavailable.
+
+numpy>=1.21
+scipy>=1.7
+PyYAML>=5.4
+
+# Hardware access only:
+smbus2>=0.4
+
+# Offline plots only (scripts/plot_log.py):
+matplotlib>=3.4
