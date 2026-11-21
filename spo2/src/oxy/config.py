@@ -21,7 +21,7 @@ DEFAULTS: Dict[str, Any] = {
         "min_pi_pct": 0.02,
         "max_pi_pct": 5.0,
         "min_sqi": 0.55,
-        "finger_dc_ir": 5000,
+        "finger_dc_ir": 20000,
         "hr_min": 30,
         "hr_max": 240,
     },

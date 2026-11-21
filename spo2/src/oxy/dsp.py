@@ -298,7 +298,7 @@ def analyze_window(
     fs: float,
     coeffs: Tuple[float, float, float] = DEFAULT_COEFFS,
     min_sqi: float = 0.55,
-    finger_dc_ir: float = 5000.0,
+    finger_dc_ir: float = 20000.0,
     min_pi: float = 0.02,
     max_pi: float = 5.0,
     hr_min: float = 30.0,

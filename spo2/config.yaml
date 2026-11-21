@@ -19,7 +19,7 @@ dsp:
   min_pi_pct: 0.02  # perfusion index sanity range
   max_pi_pct: 5.0
   min_sqi: 0.55     # below this the reading is shown as "--"
-  finger_dc_ir: 5000  # DC counts above which a finger is assumed present
+  finger_dc_ir: 20000  # DC counts above which a finger is assumed present
   hr_min: 30
   hr_max: 240
 

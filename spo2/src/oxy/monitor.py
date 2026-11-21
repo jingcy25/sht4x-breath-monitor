@@ -82,7 +82,7 @@ class Monitor:
         clock: Any = None,
         coeffs: Tuple[float, float, float] = dsp.DEFAULT_COEFFS,
         min_sqi: float = 0.55,
-        finger_dc_ir: float = 5000.0,
+        finger_dc_ir: float = 20000.0,
         min_pi: float = 0.02,
         max_pi: float = 5.0,
         hr_min: float = 30.0,
@@ -281,6 +281,7 @@ class Monitor:
                     _format_optional(features.get("hr_delta"), 1),
                 ]
             self._summary_writer.writerow(row)
+            self._summary_file.flush()
 
         if not self.quiet:
             if not result["finger"]:

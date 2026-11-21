@@ -19,6 +19,7 @@ import csv
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -774,6 +775,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    def _terminate(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, _terminate)
+    except (ValueError, OSError):
+        pass
+
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

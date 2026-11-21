@@ -172,7 +172,7 @@ class PPGBreathHoldDetector:
         exit_score: float = 0.40,
         exit_hold_s: int = 4,
         rearm_s: int = 4,
-        finger_dc_ir: float = 5000.0,
+        finger_dc_ir: float = 20000.0,
         min_pi: float = 0.02,
         max_pi: float = 5.0,
         coeffs: Tuple[float, float, float] = dsp.DEFAULT_COEFFS,
