@@ -16,17 +16,33 @@ import csv
 import json
 import statistics
 import sys
-from typing import Dict, List, Optional, Sequence, Tuple
+from datetime import datetime
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 Timeline = List[Tuple[float, str, float]]
+Label = Tuple[float, str, Optional[float]]
 
 
-def load_timeline(path: str) -> Timeline:
+def _epoch(text: str) -> Optional[float]:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+    if cleaned.endswith("Z"):
+        cleaned = cleaned[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(cleaned).timestamp()
+    except ValueError:
+        return None
+
+
+def load_timeline(path: str) -> Tuple[Timeline, Optional[float], Optional[float]]:
     if path.endswith(".jsonl"):
         rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
-        return [(float(r["t"]), str(r["state"]), float(r["score"])) for r in rows]
+        return [(float(r["t"]), str(r["state"]), float(r["score"])) for r in rows], None, None
 
     timeline: Timeline = []
+    wall_first: Optional[float] = None
+    wall_last: Optional[float] = None
     with open(path, "r", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             state = (row.get("hold_state") or "").strip()
@@ -42,25 +58,32 @@ def load_timeline(path: str) -> Timeline:
                 )
             except (KeyError, ValueError):
                 continue
-    return timeline
+            moment = _epoch(row.get("timestamp_iso", ""))
+            if moment is not None:
+                if wall_first is None:
+                    wall_first = moment
+                wall_last = moment
+    return timeline, wall_first, wall_last
 
 
-def load_labels(path: str) -> List[Tuple[float, str]]:
-    labels: List[Tuple[float, str]] = []
+def load_labels(path: str) -> List[Label]:
+    labels: List[Label] = []
     with open(path, "r", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             try:
-                labels.append((float(row["monotonic_s"]), row["event"]))
+                moment = float(row["monotonic_s"])
+                event = row["event"]
             except (KeyError, ValueError):
                 continue
+            labels.append((moment, event, _epoch(row.get("wall_time", ""))))
     labels.sort()
     return labels
 
 
-def pair_intervals(labels: Sequence[Tuple[float, str]]) -> List[Tuple[float, float]]:
+def pair_intervals(labels: Sequence[Label]) -> List[Tuple[float, float]]:
     pairs: List[Tuple[float, float]] = []
     start: Optional[float] = None
-    for moment, event in labels:
+    for moment, event, _wall in labels:
         if event == "hold_start":
             start = moment
         elif event == "hold_end" and start is not None:
@@ -133,8 +156,24 @@ def main() -> int:
     parser.add_argument("--no-sweep", action="store_true")
     args = parser.parse_args()
 
-    timeline = load_timeline(args.timeline)
+    timeline, wall_first, wall_last = load_timeline(args.timeline)
     labels = load_labels(args.labels)
+    total_labels = len(labels)
+    if wall_first is not None and wall_last is not None:
+        labels = [
+            item
+            for item in labels
+            if item[2] is None or wall_first - 60.0 <= item[2] <= wall_last + 60.0
+        ]
+    else:
+        low = timeline[0][0] - 5.0
+        high = timeline[-1][0] + 5.0
+        labels = [item for item in labels if low <= item[0] <= high]
+    if total_labels != len(labels):
+        print(
+            "note: ignored %d labels from other sessions"
+            % (total_labels - len(labels))
+        )
     intervals = pair_intervals(labels)
     if not timeline:
         print("ERROR: empty timeline")

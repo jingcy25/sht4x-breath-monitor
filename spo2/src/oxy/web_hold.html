@@ -71,7 +71,7 @@
 <header>
   <div>
     <h1>PPG 憋气识别 <span class="tag">MAX30102</span></h1>
-    <p class="hint">先正常呼吸约 20 秒（calibrating → normal），按 <b>空格</b> 标记开始憋气，松口后再按一次标记恢复。</p>
+    <p class="hint">先正常呼吸约 20 秒（calibrating → normal）。<b>按住空格 = 正在憋气，松开 = 恢复呼吸</b>。</p>
   </div>
   <div class="badge" id="conn">连接中…</div>
 </header>
@@ -102,7 +102,7 @@
   </section>
 
   <section class="panel controls">
-    <button id="toggle" class="primary">开始憋气 <kbd>Space</kbd></button>
+    <button id="toggle" class="primary">按住开始憋气 <kbd>Space</kbd></button>
     <button id="recal">重新标定</button>
   </section>
 
@@ -305,32 +305,53 @@
     state.inHold = active;
     const button = $("toggle");
     button.classList.toggle("active", active);
-    button.innerHTML = active ? '恢复呼吸 <kbd>Space</kbd>' : '开始憋气 <kbd>Space</kbd>';
+    button.innerHTML = active
+      ? '憋气中… 松开结束 <kbd>Space</kbd>'
+      : '按住开始憋气 <kbd>Space</kbd>';
   }
 
-  async function toggleHold(){
-    const event = state.inHold ? "hold_end" : "hold_start";
-    try{
-      await postJSON("/api/label", { event: event });
-      setHold(!state.inHold);
-      poll();
-    }catch(error){
+  function mark(event){
+    postJSON("/api/label", { event: event }).then(poll).catch(function(){
       const badge = $("conn");
       badge.textContent = "标记失败";
       badge.className = "badge off";
-    }
+    });
   }
 
-  $("toggle").addEventListener("click", toggleHold);
-  $("recal").addEventListener("click", async function(){
-    try{ await postJSON("/api/calibrate", {}); }catch(error){}
-  });
+  function startHold(){
+    if(state.inHold) return;
+    setHold(true);
+    mark("hold_start");
+  }
+
+  function endHold(){
+    if(!state.inHold) return;
+    setHold(false);
+    mark("hold_end");
+  }
+
+  const button = $("toggle");
+  button.addEventListener("pointerdown", function(event){ event.preventDefault(); startHold(); });
+  button.addEventListener("pointerup", function(event){ event.preventDefault(); endHold(); });
+  button.addEventListener("pointercancel", endHold);
+  window.addEventListener("pointerup", endHold);
+  window.addEventListener("blur", endHold);
 
   document.addEventListener("keydown", function(event){
     if(event.code === "Space" || event.key === " "){
       event.preventDefault();
-      toggleHold();
+      if(!event.repeat) startHold();
     }
+  });
+  document.addEventListener("keyup", function(event){
+    if(event.code === "Space" || event.key === " "){
+      event.preventDefault();
+      endHold();
+    }
+  });
+
+  $("recal").addEventListener("click", async function(){
+    try{ await postJSON("/api/calibrate", {}); }catch(error){}
   });
 
   buildFeatureRows();
