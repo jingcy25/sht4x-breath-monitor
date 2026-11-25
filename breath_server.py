@@ -262,13 +262,11 @@ def chart_js():
 def test_alarm():
     if not GPIO_OK:
         return jsonify({"ok": False, "error": "gpio unavailable"})
-    for _ in range(3):
-        GPIO.output(17, 1)
-        GPIO.output(27, 1)
-        time.sleep(0.15)
-        GPIO.output(17, 0)
-        GPIO.output(27, 0)
-        time.sleep(0.15)
+    already = alarm_event.is_set()
+    alarm_event.set()
+    time.sleep(1.3)
+    if not already:
+        alarm_event.clear()
     return jsonify({"ok": True, "pattern": "3 beeps"})
 
 
