@@ -18,6 +18,8 @@ import atexit
 import json
 import math
 import os
+import queue
+import select
 import sqlite3
 import subprocess
 import sys
@@ -170,6 +172,12 @@ config = {
     "fsr_motion_gate": True,
     "fsr_motion_max": 0.05,   # motion ceiling while falling asleep
     "fsr_motion_wake": 0.08,  # motion that wakes an already-asleep session
+    # Sleep-onset rule.  "Regular breathing" normally means N breaths in 30 s,
+    # but a patient who stops breathing before falling asleep would then never
+    # reach ASLEEP and never alarm, so a silence longer than the apnea
+    # threshold also counts as sleep onset.
+    "regular_min_breaths": 3,
+    "silence_counts_as_sleep": True,
     "sleep_onset_s": 300.0,             # 5 min; demo can lower
     "lux_dark": 10.0,
     "warn_sec": 10.0,
@@ -190,6 +198,56 @@ latest_lock = threading.Lock()
 
 clients = []
 clients_lock = threading.Lock()
+
+# WebSocket fan-out.  The acquisition loop must never block on socket I/O: a
+# backgrounded browser tab stops draining its socket, the kernel send buffer
+# fills and a blocking send() would freeze sampling (and with it the alarm
+# evaluation) indefinitely.  The loop only drops the newest message here.
+ws_queue = queue.Queue(maxsize=1)
+
+
+def _broadcast(text: str) -> None:
+    """Hand a frame to the publisher thread; never blocks."""
+    try:
+        ws_queue.put_nowait(text)
+    except queue.Full:
+        try:
+            ws_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            ws_queue.put_nowait(text)
+        except queue.Full:
+            pass
+
+
+def _drop_client(c) -> None:
+    with clients_lock:
+        if c in clients:
+            clients.remove(c)
+    try:
+        c.close()
+    except Exception:
+        pass
+
+
+def ws_publisher() -> None:
+    """Single sender; skips and drops clients that are not draining."""
+    while True:
+        text = ws_queue.get()
+        with clients_lock:
+            snapshot = list(clients)
+        for c in snapshot:
+            sock = getattr(c, "sock", None)
+            try:
+                if sock is not None:
+                    _, writable, _ = select.select([], [sock], [], 0.0)
+                    if not writable:
+                        _drop_client(c)  # not reading: do not wait for it
+                        continue
+                c.send(text)
+            except Exception:
+                _drop_client(c)
 
 camera_lock = threading.Lock()
 camera_state = {"posture": None, "confidence": None, "ts": 0.0}
@@ -232,6 +290,21 @@ def _read_retry(fn, tries: int = 3, gap: float = 0.04):
             last = exc
             time.sleep(gap)
     raise last
+
+
+def loop_watchdog() -> None:
+    """Log when the acquisition loop stops publishing (frozen sampling)."""
+    last_warn = 0.0
+    while True:
+        time.sleep(5.0)
+        with latest_lock:
+            t_last = float(latest.get("t") or 0.0)
+        if not t_last:
+            continue
+        age = time.time() - t_last
+        if age > 15.0 and (time.time() - last_warn) > 60.0:
+            last_warn = time.time()
+            print("WARNING: sensor loop stale for %.0f s" % age, flush=True)
 
 
 def camera_loop():
@@ -531,6 +604,8 @@ def sensor_loop():
                 motion_gate = bool(config["fsr_motion_gate"])
                 motion_max = float(config["fsr_motion_max"])
                 motion_wake = float(config["fsr_motion_wake"])
+                min_breaths = int(config["regular_min_breaths"])
+                silence_counts = bool(config["silence_counts_as_sleep"])
                 det.th_up = float(config["th_up"])
 
             if fsr is None:
@@ -544,6 +619,18 @@ def sensor_loop():
                 bed_candidate = candidate
                 candidate_since = t
             elif (t - candidate_since) >= debounce_s and in_bed != bed_candidate:
+                # A pause that is still open when the session ends must be
+                # recorded, otherwise the alarm is lost from the events table.
+                if pause_start is not None and not bed_candidate:
+                    try:
+                        conn.execute(
+                            "INSERT INTO events(start_ts,alarm_ts,end_ts,duration) "
+                            "VALUES(?,?,?,?)",
+                            (pause_start, pause_start + apnea_sec, t, t - pause_start),
+                        )
+                        conn.commit()
+                    except Exception as exc:
+                        print("event insert failed: %s" % exc, flush=True)
                 in_bed = bed_candidate
                 det = BreathDetector()
                 last_breath = t
@@ -614,7 +701,15 @@ def sensor_loop():
                     last_breath = t
                     breath_times.append(t)
 
-                regular = sum(1 for x in breath_times if t - x <= 30.0) >= 3
+                silence_s = t - last_breath
+                breaths_30 = sum(1 for x in breath_times if t - x <= 30.0)
+                regular = breaths_30 >= min_breaths
+                if not regular and silence_counts and silence_s > apnea_sec:
+                    # A silence longer than the apnea threshold is itself a
+                    # sleep-onset signal: otherwise a patient who stops
+                    # breathing before the onset window is never ASLEEP and
+                    # therefore never alarms.
+                    regular = True
                 sleep_context = (
                     posture == "lying"
                     or (posture is None and (lux is None or lux < lux_dark))
@@ -749,12 +844,7 @@ def sensor_loop():
                 latest.update(msg)
 
             text = json.dumps(msg)
-            with clients_lock:
-                for c in list(clients):
-                    try:
-                        c.send(text)
-                    except Exception:
-                        pass
+            _broadcast(text)
 
             time.sleep(0.05)
         except Exception as e:
@@ -966,7 +1056,8 @@ def api_selftest():
     out["config"] = {k: config[k] for k in ("fsr_in_bed", "fsr_invert", "th_up",
                                             "apnea_sec", "lux_dark", "sleep_onset_s",
                                             "fsr_motion_gate", "fsr_motion_max",
-                                            "fsr_motion_wake")}
+                                            "fsr_motion_wake", "regular_min_breaths",
+                                            "silence_counts_as_sleep")}
     return jsonify(out)
 
 
@@ -992,6 +1083,10 @@ def api_config():
             config["fsr_motion_max"] = float(data["fsr_motion_max"])
         if "fsr_motion_wake" in data:
             config["fsr_motion_wake"] = float(data["fsr_motion_wake"])
+        if "regular_min_breaths" in data:
+            config["regular_min_breaths"] = int(data["regular_min_breaths"])
+        if "silence_counts_as_sleep" in data:
+            config["silence_counts_as_sleep"] = bool(data["silence_counts_as_sleep"])
         return jsonify({"ok": True, "config": dict(config)})
 
 
@@ -1067,6 +1162,8 @@ def main():
 
     threading.Thread(target=sensor_loop, daemon=True).start()
     threading.Thread(target=camera_loop, daemon=True).start()
+    threading.Thread(target=ws_publisher, daemon=True).start()
+    threading.Thread(target=loop_watchdog, daemon=True).start()
     print("呼吸监测后端已启动: http://0.0.0.0:%d" % args.port, flush=True)
     print("FSR preset=%.3f V (invert=%s); camera=/camera; SpO2=1 Hz log-only"
           % (config["fsr_in_bed"], config["fsr_invert"]), flush=True)

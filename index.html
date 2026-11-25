@@ -599,12 +599,14 @@ window.addEventListener('error', function(e){
     try{ ws = new WebSocket(url); }catch(e){ setSourceBadge(false); return; }
     liveInit = false;
     ws.onopen = ()=>{
+      lastMsgAt = Date.now();
       setSourceBadge(true);
       fetchHistory(); fetchEvents();
       if(!liveTimer) liveTimer = setInterval(()=>{ fetchHistory(); fetchEvents(); }, 20000);
     };
     ws.onmessage = ev=>{
       try{
+        lastMsgAt = Date.now();
         const m = JSON.parse(ev.data);
         if(!liveInit){ liveInit = true; S.lastBreathT = m.t; }
         const standby = m.standby === 1;
@@ -656,8 +658,31 @@ window.addEventListener('error', function(e){
         updateBed(m.fsr, standby);
       }catch(e){}
     };
-    ws.onclose = ()=>{ setSourceBadge(false); stopLiveTimer(); };
-    ws.onerror = ()=>{ setSourceBadge(false); stopLiveTimer(); };
+    ws.onclose = ()=>{ setSourceBadge(false); stopLiveTimer(); lastMsgAt = 0; scheduleReconnect(); };
+    ws.onerror = ()=>{ setSourceBadge(false); stopLiveTimer(); lastMsgAt = 0; scheduleReconnect(); };
+    startStaleWatch();
+  }
+  // The dashboard must survive a dropped/backgrounded socket: without this the
+  // numbers simply stop moving and the page looks frozen.
+  let lastMsgAt = 0, reconnectTimer = null, staleTimer = null;
+  function scheduleReconnect(){
+    if(reconnectTimer || !cfg.live) return;
+    reconnectTimer = setTimeout(()=>{
+      reconnectTimer = null;
+      if(cfg.live) connectReal(cfg.host);
+    }, 2000);
+  }
+  function startStaleWatch(){
+    if(staleTimer) return;
+    staleTimer = setInterval(()=>{
+      if(!cfg.live || !lastMsgAt) return;
+      const age = (Date.now() - lastMsgAt) / 1000;
+      if(age > 4){
+        setSourceBadge(false);
+        $("srcText").textContent = "断线 " + Math.round(age) + " s";
+        if(ws && ws.readyState === WebSocket.CLOSED) scheduleReconnect();
+      }
+    }, 1000);
   }
   function stopLiveTimer(){
     if(liveTimer){ clearInterval(liveTimer); liveTimer = null; }
