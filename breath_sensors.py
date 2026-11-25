@@ -57,7 +57,15 @@ class VEML7700:
 
 
 class ADS1115:
-    """16-bit ADC, single-ended channel against GND, PGA +/-2.048 V."""
+    """16-bit ADC, single-ended channel against GND.
+
+    The config word below sets PGA[2:0] = 001, i.e. +/-4.096 V full scale
+    (125 uV per LSB).  The earlier code still divided by 2.048 V, which
+    reported exactly half the real voltage; keep the two in sync if the PGA
+    bits are ever changed.
+    """
+
+    FULL_SCALE_V = 4.096
 
     def __init__(self, bus_num: int = 1, addr: int = 0x48) -> None:
         self.bus = smbus2.SMBus(bus_num)
@@ -73,7 +81,7 @@ class ADS1115:
         raw = (data[0] << 8) | data[1]
         if raw > 32767:
             raw -= 65536
-        return raw * 2.048 / 32768.0, raw
+        return raw * self.FULL_SCALE_V / 32768.0, raw
 
     def close(self) -> None:
         self.bus.close()

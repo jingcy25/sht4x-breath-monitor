@@ -19,7 +19,7 @@
 |---|---|---|
 | 口鼻 SHT4x | I2C1 0x44（Pin 1/3/5/9） | 主呼吸通道 |
 | VEML7700 | I2C1 0x10 | 开/关灯、相机门控 |
-| ADS1115 | I2C1 0x48（ADDR→GND） | FSR 单端 AIN0，PGA ±2.048 V |
+| ADS1115 | I2C1 0x48（ADDR→GND） | FSR 单端 AIN0，PGA ±4.096 V（0–3.3 V 分压可直接接） |
 | MAX30102 | I2C1 0x57 | SpO₂/HR，1 Hz 记录 |
 | 蜂鸣器 | GPIO17（Pin 11） | NPN + 1 kΩ + 续流 |
 | LED | GPIO27（Pin 13） | 330 Ω，按同学接线 |
