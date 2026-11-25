@@ -45,6 +45,11 @@ except Exception as exc:
 
 alarm_event = threading.Event()
 alarm_stats = {"bursts": 0, "ticks": 0, "beeps": 0}
+alarm_override = {"until": 0.0}
+
+
+def alarm_active():
+    return alarm_event.is_set() or time.time() < alarm_override["until"]
 
 
 def alarm_worker():
@@ -52,14 +57,14 @@ def alarm_worker():
     """Three short beeps with a pause between bursts, LED in sync."""
     while True:
         alarm_stats["ticks"] += 1
-        if not alarm_event.is_set():
+        if not alarm_active():
             if GPIO_OK:
                 GPIO.output(17, 0)
                 GPIO.output(27, 0)
             time.sleep(0.05)
             continue
         for _ in range(3):
-            if not alarm_event.is_set():
+            if not alarm_active():
                 break
             GPIO.output(17, 1)
             GPIO.output(27, 1)
@@ -67,10 +72,10 @@ def alarm_worker():
             time.sleep(0.15)
             GPIO.output(17, 0)
             GPIO.output(27, 0)
-            if not alarm_event.is_set():
+            if not alarm_active():
                 break
             time.sleep(0.15)
-        if alarm_event.is_set():
+        if alarm_active():
             alarm_stats["bursts"] += 1
             time.sleep(0.9)
 
@@ -279,11 +284,7 @@ def alarm_state():
 def test_alarm():
     if not GPIO_OK:
         return jsonify({"ok": False, "error": "gpio unavailable"})
-    already = alarm_event.is_set()
-    alarm_event.set()
-    time.sleep(1.3)
-    if not already:
-        alarm_event.clear()
+    alarm_override["until"] = time.time() + 1.3
     return jsonify({"ok": True, "pattern": "3 beeps"})
 
 
