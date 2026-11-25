@@ -44,9 +44,11 @@ except Exception as exc:
 
 
 alarm_event = threading.Event()
+alarm_stats = {"bursts": 0}
 
 
 def alarm_worker():
+    print("alarm worker started", flush=True)
     """Three short beeps with a pause between bursts, LED in sync."""
     while True:
         if not alarm_event.is_set():
@@ -67,6 +69,7 @@ def alarm_worker():
                 break
             time.sleep(0.15)
         if alarm_event.is_set():
+            alarm_stats["bursts"] += 1
             time.sleep(0.9)
 
 
@@ -258,6 +261,11 @@ def index():
 @app.route("/chart.umd.min.js")
 def chart_js():
     return send_from_directory(os.getcwd(), "chart.umd.min.js")
+
+
+@app.route("/api/alarm_state")
+def alarm_state():
+    return jsonify({"alarm": alarm_event.is_set(), "bursts": alarm_stats["bursts"]})
 
 
 @app.route("/api/test_alarm")
