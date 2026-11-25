@@ -198,6 +198,23 @@ camera_frame_bytes = 0
 dev_lock = threading.Lock()
 devices = {"breath": None, "light": None, "adc": None}
 
+# One I2C transaction at a time: SHT4x needs a two-step (command, then read)
+# sequence, and a second thread cutting in between makes the sensor NACK.
+bus_lock = threading.Lock()
+
+
+def _read_retry(fn, tries: int = 3, gap: float = 0.04):
+    """Run an I2C transaction under the bus lock, retrying transient NACKs."""
+    last = None
+    for attempt in range(tries):
+        try:
+            with bus_lock:
+                return fn()
+        except Exception as exc:
+            last = exc
+            time.sleep(gap)
+    raise last
+
 
 def camera_loop():
     """Single camera reader; MJPEG clients consume the latest JPEG.
@@ -451,7 +468,7 @@ def sensor_loop():
             # FSR presence, 2 Hz (not for B)
             if adc is not None and (t - last_fsr) > 0.5:
                 try:
-                    fsr, _ = adc.read_voltage(0)
+                    fsr, _ = _read_retry(lambda: adc.read_voltage(0))
                 except Exception:
                     fsr = None
                 last_fsr = t
@@ -506,7 +523,7 @@ def sensor_loop():
             if (t - last_slow) > 2.0:
                 if light_sensor is not None:
                     try:
-                        _, lux = light_sensor.read()
+                        _, lux = _read_retry(light_sensor.read)
                     except Exception:
                         lux = None
                 last_slow = t
@@ -543,7 +560,7 @@ def sensor_loop():
 
             if in_bed and breath_sensor is not None:
                 try:
-                    temp, h = breath_sensor.read()
+                    temp, h = _read_retry(breath_sensor.read)
                 except Exception as exc:
                     temp, h = last_temp, last_h
                     print("SHT4x read error: %s" % exc, flush=True)
@@ -619,7 +636,7 @@ def sensor_loop():
                     if breath_sensor is not None and (t - last_standby) > 2.0:
                         last_standby = t
                         try:
-                            last_temp, last_h = breath_sensor.read()
+                            last_temp, last_h = _read_retry(breath_sensor.read)
                             temp, h = last_temp, last_h
                         except Exception:
                             pass
@@ -840,7 +857,7 @@ def api_selftest():
     sht = {"addr": "0x44/i2c-1", "present": b is not None}
     if b is not None:
         try:
-            temp, rh = b.read()
+            temp, rh = _read_retry(b.read)
             sht.update({"ok": True, "temp_c": round(temp, 2), "rh_pct": round(rh, 2)})
         except Exception as exc:
             sht.update({"ok": False, "error": str(exc)})
@@ -849,7 +866,7 @@ def api_selftest():
     veml = {"addr": "0x10/i2c-1", "present": l is not None}
     if l is not None:
         try:
-            raw, lux = l.read()
+            raw, lux = _read_retry(l.read)
             veml.update({"ok": True, "raw": raw, "lux": round(lux, 2)})
         except Exception as exc:
             veml.update({"ok": False, "error": str(exc)})
@@ -862,7 +879,7 @@ def api_selftest():
             samples = []
             for _ in range(6):
                 try:
-                    volt, _raw = a.read_voltage(ch)
+                    volt, _raw = _read_retry(lambda: a.read_voltage(ch))
                     samples.append(volt)
                 except Exception as exc:
                     adc_info["error"] = str(exc)
