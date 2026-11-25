@@ -1,0 +1,7 @@
+flask
+flask-sock
+smbus2
+RPi.GPIO
+numpy
+# OpenCV on Raspberry Pi: prefer `sudo apt install -y python3-opencv`
+# SpO2 subproject has its own requirements: spo2/requirements.txt

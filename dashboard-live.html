@@ -208,6 +208,7 @@ window.addEventListener('error', function(e){
     </div>
     <div class="top-right">
       <span class="clock" id="clock">--:--:--</span>
+      <a class="src-badge" href="/camera" title="打开摄像头躺/坐识别" style="text-decoration:none">📷 摄像头</a>
       <span class="src-badge" id="srcBadge"><span class="dot"></span><span id="srcText">演示模式</span></span>
       <button class="icon-btn" id="settingsBtn" title="参数设置" aria-label="参数设置">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -241,7 +242,7 @@ window.addEventListener('error', function(e){
           <div class="bed-state" id="bedState">--</div>
           <div class="bed-row"><span>床压</span><b id="fsr">--</b><span class="u">V</span></div>
           <div class="bed-bar"><i id="bedBar"></i><em></em></div>
-          <div class="bed-hint">触发线 0.10 V · 低于即开始测量</div>
+          <div class="bed-hint" id="bedHint">触发线 0.10 V · 低于/高于按极性判断</div>
         </div>
       </div>
 
@@ -270,6 +271,10 @@ window.addEventListener('error', function(e){
           <div class="tile breath"><div class="k">暂停计时</div><div class="v ok" id="apneaVal">0<span class="u">s</span></div></div>
           <div class="tile breath"><div class="k">暂停事件</div><div class="v ok" id="countVal">0<span class="u">次</span></div></div>
           <div class="tile"><div class="k">报警阈值</div><div class="v" id="thVal">20<span class="u">s</span></div></div>
+          <div class="tile"><div class="k">A 状态</div><div class="v" id="aState">--</div></div>
+          <div class="tile"><div class="k">相机姿势</div><div class="v" id="cameraPosture">--</div></div>
+          <div class="tile"><div class="k">SpO₂</div><div class="v"><span id="spo2Val">--</span><span class="u">%</span></div></div>
+          <div class="tile"><div class="k">心率</div><div class="v"><span id="hrVal">--</span><span class="u">bpm</span></div></div>
         </div>
       </div>
 
@@ -311,6 +316,18 @@ window.addEventListener('error', function(e){
       <label>预警阈值（秒，临近报警的提醒）</label>
       <input type="number" id="warnSec" step="1" min="2" max="60" value="10">
     </div>
+    <div class="field">
+      <label>FSR 阈值预设（V；先取三档，实测后替换）</label>
+      <select id="fsrPreset" style="width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--ink);border-radius:10px;padding:9px 11px;font-family:var(--mono);font-size:13px">
+        <option value="0.05">0.05 V（轻压）</option>
+        <option value="0.10" selected>0.10 V（默认）</option>
+        <option value="0.20">0.20 V（重压）</option>
+      </select>
+    </div>
+    <div class="switch" id="fsrInvert">
+      <span class="lbl">FSR 极性反转（压力升高电压）</span>
+      <span class="track" id="fsrInvertTrack"></span>
+    </div>
     <div class="switch" id="modeSwitch">
       <span class="lbl">实时模式（连接树莓派）</span>
       <span class="track" id="modeTrack"></span>
@@ -334,7 +351,7 @@ window.addEventListener('error', function(e){
   const fmtHM = ts => new Date(ts*1000).toLocaleTimeString("zh-CN",{hour12:false,hour:"2-digit",minute:"2-digit"});
   const isHttp = location.protocol === "http:" || location.protocol === "https:";
 
-  const cfg = { thUp: 1.2, apneaSec: 20, warnSec: 10, liveWindow: 30, live: false, host: "raspberrypi.local:8000" };
+  const cfg = { thUp: 1.2, apneaSec: 20, warnSec: 10, liveWindow: 30, live: false, host: "raspberrypi.local:8000", fsr: 0.10, fsrInvert: false };
 
   const S = {
     t: 0, period: 4.0, amp: 3.2, baseline: 45.0, tempBase: 26.4,
@@ -506,12 +523,14 @@ window.addEventListener('error', function(e){
   function setStandby(on){
     document.body.classList.toggle("standby", on);
     if(on){
-      setState("standby", "离床 · 待机", "床压低于 0.10 V 自动开始测量");
+      setState("standby", "离床 · 待机", "FSR 触发线 " + cfg.fsr.toFixed(2) + " V；极性 " + (cfg.fsrInvert ? "反相" : "正相"));
       $("bpmBig").textContent = "—";
       $("sinceVal").innerHTML = "—";
       $("apneaVal").innerHTML = "—";
       $("countVal").innerHTML = "—";
     }
+    const hint = $("bedHint");
+    if(hint) hint.textContent = "触发线 " + cfg.fsr.toFixed(2) + " V · " + (cfg.fsrInvert ? "高于触发" : "低于触发");
   }
 
   function setState(mode, text, sub){
@@ -610,6 +629,13 @@ window.addEventListener('error', function(e){
         put("envTemp", m.env_temp, 1);
         put("envHum", m.env_hum, 1);
         put("lux", m.lux, 1);
+        put("spo2Val", m.spo2, 1);
+        put("hrVal", m.hr, 0);
+        const aLabel = {standby:"待机", awake:"清醒", asleep:"已入睡", gap:"离床"}[m.a_state] || (m.standby ? "待机" : "—");
+        const camLabel = {lying:"躺下", sitting:"坐起"}[m.camera_posture] || "未知";
+        const aEl = $("aState"), cEl = $("cameraPosture");
+        if(aEl){ aEl.textContent = aLabel; aEl.className = "v " + (m.a_state === "asleep" ? "ok" : "warn"); }
+        if(cEl){ cEl.textContent = camLabel; cEl.className = "v " + (m.camera_posture ? "ok" : "warn"); }
         updateBed(m.fsr, standby);
       }catch(e){}
     };
@@ -627,7 +653,7 @@ window.addEventListener('error', function(e){
   function pushConfig(){
     if(!cfg.live) return;
     fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({th_up: cfg.thUp, apnea_sec: cfg.apneaSec})}).catch(()=>{});
+      body: JSON.stringify({th_up: cfg.thUp, apnea_sec: cfg.apneaSec, fsr_in_bed: cfg.fsr, fsr_invert: cfg.fsrInvert})}).catch(()=>{});
   }
 
   // ---------- 控件 ----------
@@ -654,6 +680,13 @@ window.addEventListener('error', function(e){
   $("thUp").addEventListener("change", e=>{ cfg.thUp = clamp(+e.target.value||1.2, 0.1, 5); pushConfig(); });
   $("apneaSec").addEventListener("change", e=>{ cfg.apneaSec = clamp(+e.target.value||20, 5, 120); pushConfig(); });
   $("warnSec").addEventListener("change", e=>{ cfg.warnSec = clamp(+e.target.value||10, 2, 60); });
+  $("fsrPreset").addEventListener("change", e=>{ cfg.fsr = clamp(+e.target.value||0.10, 0.01, 2.0); pushConfig(); setStandby(document.body.classList.contains("standby")); });
+  $("fsrInvert").addEventListener("click", ()=>{
+    cfg.fsrInvert = !cfg.fsrInvert;
+    $("fsrInvert").classList.toggle("on", cfg.fsrInvert);
+    pushConfig();
+    setStandby(document.body.classList.contains("standby"));
+  });
   $("host").addEventListener("change", e=>{ cfg.host = e.target.value.trim() || cfg.host; });
   $("exportBtn").addEventListener("click", ()=>{
     if(cfg.live){ window.open("/api/export.csv", "_blank"); return; }
