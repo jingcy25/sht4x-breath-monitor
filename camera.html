@@ -40,7 +40,7 @@
     </div>
     <div style="display:flex;gap:10px;align-items:center">
       <span class="pill"><span class="dot" id="dot"></span><span id="src">初始化</span></span>
-      <a href="/">← 返回仪表盘</a>
+      <a href="/" id="toDash">← 返回仪表盘</a>
     </div>
   </div>
 
@@ -102,6 +102,64 @@
 </script>
 <script src="/static/js/teachablemachine-pose.min.js"></script>
 <script>
+/* camera page i18n: follows the dashboard language (localStorage 'dsh-lang') */
+(function () {
+  var EN = {
+    "摄像头 · 躺/坐识别": "Camera · lying / sitting",
+    "Teachable Machine Pose（Sit / Lie）· 浏览器端推理 · 结果回传 A 层":
+      "Teachable Machine Pose (Sit / Lie) · in-browser inference · posted to the A layer",
+    "初始化": "init",
+    "← 返回仪表盘": "← Back to dashboard",
+    "Pi 摄像头（MJPEG）": "Pi camera (MJPEG)",
+    "页面打开期间每秒约 2 次推理；关闭页面后 A 层把摄像头视为 unknown，只用 FSR + 光照。":
+      "About 2 inferences per second while this page is open; once closed the A layer treats the camera as unknown and falls back to FSR + light.",
+    "识别结果": "Result",
+    "姿势": "Posture",
+    "置信度": "Confidence",
+    "推理延迟": "Latency",
+    "坐起": "Sitting",
+    "躺下": "Lying",
+    "未知": "Unknown",
+    "实时": "LIVE", "未连接": "offline",
+    "正在加载模型": "Loading model", "模型加载失败": "Model failed to load",
+    "已注入引擎兼容补丁": "Engine shim applied, retrying inference…",
+    "推理失败": "Inference failed",
+    "摄像头流不可用（检查 /dev/video0 或 USB hub）": "Camera stream unavailable (check /dev/video0 or the USB hub)",
+    "摄像头已连接": "Camera connected",
+    "模型已加载（引擎补丁已应用），等待画面…": "Model loaded (engine shim applied), waiting for frames…",
+    "模型已加载，等待画面…": "Model loaded, waiting for frames…"
+  };
+  var param = new URLSearchParams(location.search).get("lang");
+  var saved = null;
+  try { saved = localStorage.getItem("dsh-lang"); } catch (e) {}
+  var lang = (param || saved || "zh").toLowerCase();
+  window.LANG = lang.indexOf("en") === 0 ? "en" : "zh";
+  window.isEN = function () { return window.LANG === "en"; };
+  window.T = function (s) {
+    if (window.LANG !== "en") return s;
+    return Object.prototype.hasOwnProperty.call(EN, s) ? EN[s] : s;
+  };
+  function walk() {
+    if (window.LANG !== "en") return;
+    var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode: function (n) {
+        return /[\u4e00-\u9fff]/.test(n.nodeValue) ? NodeFilter.FILTER_ACCEPT
+                                                   : NodeFilter.FILTER_REJECT;
+      }
+    });
+    var nodes = [], n;
+    while ((n = w.nextNode())) nodes.push(n);
+    nodes.forEach(function (node) {
+      var k = node.nodeValue.trim();
+      if (Object.prototype.hasOwnProperty.call(EN, k)) node.nodeValue = node.nodeValue.replace(k, EN[k]);
+    });
+    var a = document.getElementById("toDash");
+    if (a) a.textContent = "← Back to dashboard";
+  }
+  document.addEventListener("DOMContentLoaded", walk);
+})();
+</script>
+<script>
 (function(){
   "use strict";
   const $ = id => document.getElementById(id);
@@ -126,22 +184,22 @@
   }
   function setLive(on) {
     $("dot").classList.toggle("live", !!on);
-    $("src").textContent = on ? "实时" : "未连接";
+    $("src").textContent = T(on ? "实时" : "未连接");
   }
 
   async function init() {
     try {
-      setStatus("加载模型 /static/pose_model …");
+      setStatus(T("正在加载模型") + " /static/pose_model …");
       model = await tmPose.load("/static/pose_model/model.json", "/static/pose_model/metadata.json");
       setStatus(
-        window.__tmShimOk ? "模型已加载（引擎补丁已应用），等待画面…" : "模型已加载，等待画面…",
+        T(window.__tmShimOk ? "模型已加载（引擎补丁已应用），等待画面…" : "模型已加载，等待画面…"),
         "var(--jade)"
       );
       setLive(true);
       requestAnimationFrame(loop);
     } catch (err) {
       console.error(err);
-      setStatus("模型加载失败：" + (err && err.message ? err.message : err), "var(--coral)");
+      setStatus(T("模型加载失败") + "：" + (err && err.message ? err.message : err), "var(--coral)");
       setLive(false);
     }
   }
@@ -174,7 +232,7 @@
       const conf = Number(best.probability || 0);
       if (conf < 0.60) posture = "unknown";
 
-      $("posture").textContent = posture === "sitting" ? "坐起" : posture === "lying" ? "躺下" : "未知";
+      $("posture").textContent = T(posture === "sitting" ? "坐起" : posture === "lying" ? "躺下" : "未知");
       $("posture").className = "v " + (posture === "unknown" ? "warn" : "ok");
       $("conf").textContent = (conf * 100).toFixed(1) + "%";
       $("latency").textContent = Math.round(performance.now() - t0) + " ms";
@@ -198,11 +256,11 @@
         shimRetried = true;
         if (window.__tmEngineShim("retry")) {
           // The rAF loop calls infer() again in ~0.5 s with the patched engine.
-          setStatus("已注入引擎兼容补丁，重试推理…", "var(--amber)");
+          setStatus(T("已注入引擎兼容补丁"), "var(--amber)");
           return;
         }
       }
-      setStatus("推理失败：" + msg, "var(--coral)");
+      setStatus(T("推理失败") + "：" + msg, "var(--coral)");
     } finally {
       inferring = false;
     }
@@ -217,10 +275,10 @@
   }
 
   stream.addEventListener("error", () => {
-    setStatus("摄像头流不可用（检查 /dev/video0 或 USB hub）", "var(--coral)");
+    setStatus(T("摄像头流不可用（检查 /dev/video0 或 USB hub）"), "var(--coral)");
     setLive(false);
   });
-  stream.addEventListener("load", () => setStatus("摄像头已连接", "var(--jade)"));
+  stream.addEventListener("load", () => setStatus(T("摄像头已连接"), "var(--jade)"));
 
   init();
 })();

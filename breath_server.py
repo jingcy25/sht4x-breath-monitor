@@ -1153,6 +1153,46 @@ def api_selftest():
     return jsonify(out)
 
 
+_REPORT_EN = [
+    ("<title>睡眠报告 ", "<title>Sleep report "),
+    ("睡眠呼吸监测报告", "Sleep &amp; Breathing Report"),
+    ("<h2>A 状态时间线</h2>", "<h2>A-state timeline</h2>"),
+    ("<h2>呼吸暂停事件</h2>", "<h2>Apnea events</h2>"),
+    ("<h2>每小时呼吸率</h2>", "<h2>Breathing rate per hour</h2>"),
+    ("<h2>血氧 / 心率</h2>", "<h2>SpO2 / heart rate</h2>"),
+    ("<th>状态</th><th>段数</th><th>累计时长</th><th>占区间</th>",
+     "<th>State</th><th>Segments</th><th>Total time</th><th>Share</th>"),
+    ("<th>#</th><th>暂停开始</th><th>触发报警</th><th>总暂停时长</th>",
+     "<th>#</th><th>Pause start</th><th>Alarm at</th><th>Duration</th>"),
+    ("<th>小时</th><th>呼吸次数</th><th>次/分</th><th>相对强度</th>",
+     "<th>Hour</th><th>Breaths</th><th>per min</th><th>Relative</th>"),
+    ("打印 / 存为 PDF", "Print / Save as PDF"),
+    ("导出 CSV", "Export CSV"),
+    ("未记录（服务未运行/无数据）", "No data recorded"),
+    ("离床（间隙）", "Out of bed (gap)"),
+    ("已入睡", "Asleep"),
+    ("清醒", "Awake"),
+    ("待机", "Standby"),
+    ("该时段没有状态记录", "No state records in this window"),
+    ("该时段未记录到呼吸暂停事件", "No apnea events recorded"),
+    ("该时段没有有效血氧样本（MAX30102 未接或未佩戴）。", "No valid SpO2 samples (sensor absent or not worn)."),
+    ("当前状态：", "Current state: "),
+    (" 个有效样本，覆盖 ", " valid samples, spanning "),
+    ("，其中 ", ", of which "),
+    (" 个 &lt; 90%", " below 90%"),
+    (" 个 < 90%", " below 90%"),
+    (" 分钟", " min"),
+    ("无样本", "No samples"),
+]
+
+
+def _localize_report(html):
+    """Post-render phrase substitution for the English report."""
+    for zh, en in _REPORT_EN:
+        html = html.replace(zh, en)
+    return html
+
+
 @app.route("/api/report")
 def api_report():
     """One-click sleep report: a print-ready HTML page for the last N hours."""
@@ -1161,6 +1201,7 @@ def api_report():
     except Exception:
         hours = 12.0
     hours = max(1.0, min(72.0, hours))
+    en = (request.args.get("lang") or "zh").lower().startswith("en")
     now = time.time()
     since = now - hours * 3600.0
 
@@ -1231,15 +1272,20 @@ def api_report():
         return datetime.fromtimestamp(ts, tz).strftime("%H:%M")
 
     kpi = [
-        ("在床时长", hm(in_bed_s)),
-        ("入睡时长 (ASLEEP)", hm(dur.get("asleep", 0.0))),
-        ("清醒时长 (AWAKE)", hm(dur.get("awake", 0.0))),
-        ("暂停事件", "%d 次" % len(events)),
-        ("总暂停时长", hm(sum(float(e[3] or 0) for e in events))),
-        ("最长暂停", hm(max([float(e[3] or 0) for e in events], default=0.0))),
-        ("平均呼吸率", ("%.1f 次/分" % (n_breath * 60.0 / covered_s)) if covered_s > 60 else "—"),
-        ("口鼻湿度", ("%.1f → %.1f %%RH（均 %.1f）" % (h_min or 0, h_max or 0, h_avg or 0))
-         if n_s else "—"),
+        ("Time in bed", hm(in_bed_s)) if en else ("在床时长", hm(in_bed_s)),
+        ("Asleep", hm(dur.get("asleep", 0.0))) if en else ("入睡时长 (ASLEEP)", hm(dur.get("asleep", 0.0))),
+        ("Awake", hm(dur.get("awake", 0.0))) if en else ("清醒时长 (AWAKE)", hm(dur.get("awake", 0.0))),
+        ("Pauses", "%d" % len(events)) if en else ("暂停事件", "%d 次" % len(events)),
+        ("Total pause time", hm(sum(float(e[3] or 0) for e in events))) if en
+            else ("总暂停时长", hm(sum(float(e[3] or 0) for e in events))),
+        ("Longest pause", hm(max([float(e[3] or 0) for e in events], default=0.0))) if en
+            else ("最长暂停", hm(max([float(e[3] or 0) for e in events], default=0.0))),
+        ("Mean breathing rate",
+         (("%.1f /min" if en else "%.1f 次/分") % (n_breath * 60.0 / covered_s))
+         if covered_s > 60 else "—"),
+        ("Mouth/nose RH",
+         (("%.1f → %.1f %%RH (avg %.1f)" if en else "%.1f → %.1f %%RH（均 %.1f）")
+          % (h_min or 0, h_max or 0, h_avg or 0)) if n_s else "—"),
     ]
 
     kpi_html = "".join(
@@ -1375,11 +1421,44 @@ def api_report():
     ) or '<tr><td colspan="4" class="muted">该时段未记录到呼吸暂停事件</td></tr>'
 
     if sp_n:
-        spo2_html = ("<p><b>%d</b> 个有效样本，平均 <b>%.1f%%</b>，最低 <b>%.0f%%</b>，"
-                     "平均心率 <b>%.0f bpm</b>。</p>" % (sp_n, sp_avg or 0, sp_min or 0, hr_avg or 0))
+        if en:
+            spo2_html = ("<p><b>%d</b> valid samples · mean <b>%.1f%%</b> · "
+                         "min <b>%.0f%%</b> · mean heart rate <b>%.0f bpm</b>.</p>"
+                         % (sp_n, sp_avg or 0, sp_min or 0, hr_avg or 0))
+        else:
+            spo2_html = ("<p><b>%d</b> 个有效样本，平均 <b>%.1f%%</b>，最低 <b>%.0f%%</b>，"
+                         "平均心率 <b>%.0f bpm</b>。</p>"
+                         % (sp_n, sp_avg or 0, sp_min or 0, hr_avg or 0))
     else:
-        spo2_html = ('<p class="muted">该时段没有有效血氧样本（MAX30102 未接或未佩戴）。'
-                     '当前状态：%s。</p>' % (spo2_state["status"]))
+        if en:
+            spo2_html = ('<p class="muted">No valid SpO2 samples in this window '
+                         '(sensor absent or not worn). Current state: %s.</p>'
+                         % (spo2_state["status"]))
+        else:
+            spo2_html = ('<p class="muted">该时段没有有效血氧样本（MAX30102 未接或未佩戴）。'
+                         '当前状态：%s。</p>' % (spo2_state["status"]))
+
+    if en:
+        sub = ("Window: <b>%s — %s</b> (generated %s, last %.0f h, time zone %s)<br>"
+               "device raspberrypi-09 · sampling ~%.0f Hz · lamp state on the timeline"
+               % (clock(since), clock(now), clock(now), hours, tz_label, sample_hz))
+        notes = ("Criteria: the A layer combines the FSR in-bed anchor with "
+                 "(camera lying/sitting when the light is on, ambient light when it is off) "
+                 "and mouth/nose humidity breathing. Only after reaching ASLEEP does "
+                 "&gt; %.0f s without breathing trigger the alarm (current onset window %.0f s).<br>"
+                 "Limitations: a single SHT4x channel is sensitive to talking, rolling over and "
+                 "probe displacement; the in-bed decision is unreliable while the FSR is "
+                 "uncalibrated. This report is a coursework demo, not a medical conclusion."
+                 % (config["apnea_sec"], config["sleep_onset_s"]))
+    else:
+        sub = ("统计区间：<b>%s — %s</b>（生成时刻 %s，向前 %.0f 小时，时区 %s）<br>"
+               "设备：raspberrypi-09 · 采样约 %.0f Hz · 床头灯状态见状态时间线"
+               % (clock(since), clock(now), clock(now), hours, tz_label, sample_hz))
+        notes = ("判定口径：A 层由 FSR 在床锚点 +（开灯时相机躺/坐，关灯时光照）+ 口鼻温湿度呼吸共同决定；"
+                 "只有进入「已入睡」后，连续无呼吸 &gt; %.0f s 才触发报警（当前入睡判定时长 %.0f s）。<br>"
+                 "局限：SHT4x 单通道易受说话、翻身、口鼻偏移影响；FSR 未标定时在床判定不可靠；"
+                 "本报告为课程演示用途，不构成医学结论。"
+                 % (config["apnea_sec"], config["sleep_onset_s"]))
 
     html = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -1414,8 +1493,7 @@ def api_report():
   @media print{body{background:#fff;padding:0}.sheet{border:0;border-radius:0}.toolbar{display:none}}
 </style></head><body><div class="sheet">
   <h1>睡眠呼吸监测报告</h1>
-  <div class="sub">统计区间：<b>%(start)s — %(end)s</b>（生成时刻 %(now)s，向前 %(hours).0f 小时，时区 %(tz)s）<br>
-    设备：raspberrypi-09 · 采样约 %(hz).0f Hz · 床头灯状态见状态时间线</div>
+  <div class="sub">%(sub)s</div>
 
   <div class="kpis">%(kpi)s</div>
 
@@ -1439,12 +1517,7 @@ def api_report():
   %(spo2_chart)s
   %(spo2)s
 
-  <div class="note">
-    判定口径：A 层由 FSR 在床锚点 +（开灯时相机躺/坐，关灯时光照）+ 口鼻温湿度呼吸共同决定；
-    只有进入「已入睡」后，连续无呼吸 &gt; %(apnea).0f s 才触发报警（当前入睡判定时长 %(onset).0f s）。<br>
-    局限：SHT4x 单通道易受说话、翻身、口鼻偏移影响；FSR 未标定时在床判定不可靠；
-    本报告为课程演示用途，不构成医学结论。
-  </div>
+  <div class="note">%(notes)s</div>
 
   <div class="toolbar">
     <button onclick="window.print()">打印 / 存为 PDF</button>
@@ -1452,6 +1525,8 @@ def api_report():
   </div>
 </div></body></html>""" % {
         "range": clock(since),
+        "sub": sub,
+        "notes": notes,
         "start": clock(since),
         "end": clock(now),
         "now": clock(now),
@@ -1469,6 +1544,8 @@ def api_report():
         "apnea": config["apnea_sec"],
         "onset": config["sleep_onset_s"],
     }
+    if en:
+        html = _localize_report(html)
     return Response(html, mimetype="text/html",
                     headers={"Cache-Control": "no-store, max-age=0"})
 

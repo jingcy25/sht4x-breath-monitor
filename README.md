@@ -147,6 +147,7 @@ I²C 探测用 **SMBus quick write**（等价 `i2cdetect`）。注意不能用 `
 - **仪表盘自动重连**：断线 4 s 后角标显示 `断线 N s` 并每 2 s 重连，不再表现为“页面卡死”。
 - **姿态平滑（`PostureFilter`）**：TM Pose 在模糊画面上会以 0.9 置信度在 lying/sitting 之间来回跳，而单帧 `sitting` 就会把会话踢回 AWAKE 并清零入睡计时（实测 17:24 那分钟 lying 17 帧、sitting 38 帧）。现在新姿态必须持续 **lying 2 s / sitting 3 s** 才替换当前姿态，断流 8 s 后姿态失效；A 层仍然只看到“一个姿态”，只是稳定版。
 - **SpO2 可见性**：`/api/status` 新增 `spo2_state`（idle/running/exited/absent）；`/api/selftest` 增加 `spo2` 段，直接探测 `0x57` 并给出“未接/在位”结论，仪表盘 SpO2 瓦片下方显示状态。
+- **SpO2 实时性修复**：`spo2_worker._tail_loop` 原来把 `csv.DictReader` 绑在文件上，读到第一次 EOF 就永久停止，导致「CSV 有数据、`/api/status` 一直是 `--`、`spo2_samples` 0 行」。现在改成逐行 `readline + csv.reader` 解析，并打 `tail watching` / `tail rows=N` 诊断日志。实测 HW-60S（MAX30102）：`PART_ID=0x15`、HR 85–92 bpm、SpO₂ 99.3–99.8 %、PI≈0.65 %、SQI≈0.97。
 - **一键睡眠报告**：`/api/report` 生成可直接打印或存 PDF 的单页 HTML（KPI、A 状态时间线、暂停事件、每小时呼吸率、血氧小结、口径与局限说明），`/api/report.csv` 导出同一时间窗原始样本。
 - **沉默也是入睡信号**：进入 `asleep` 原本要求“30 s 内 ≥3 次呼吸”，于是在入睡前就停呼吸的人永远进不了 `asleep`、永远不报警。现在“无呼吸时长 > `apnea_sec`”同样算满足入睡条件（`silence_counts_as_sleep`，可用 `POST /api/config {"silence_counts_as_sleep": false}` 关闭，恢复严格模式）。
 

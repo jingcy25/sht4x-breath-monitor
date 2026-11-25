@@ -210,7 +210,9 @@ window.addEventListener('error', function(e){
     <div class="top-right">
       <span class="clock" id="clock">--:--:--</span>
       <a class="src-badge" href="/camera" title="打开摄像头躺/坐识别" style="text-decoration:none">📷 摄像头</a>
-      <a class="src-badge" href="/api/report?hours=12" target="_blank" rel="noopener" title="生成/打印睡眠报告" style="text-decoration:none">📄 睡眠报告</a>
+      <a class="src-badge" id="reportLink" href="/api/report?hours=12" target="_blank" rel="noopener" title="生成/打印睡眠报告" style="text-decoration:none">📄 睡眠报告</a>
+      <button class="icon-btn" id="langBtn" title="中文 / English"
+              onclick="window.setLang(window.isEN() ? 'zh' : 'en')">EN</button>
       <span class="src-badge" id="srcBadge"><span class="dot"></span><span id="srcText">演示模式</span></span>
       <button class="icon-btn" id="settingsBtn" title="参数设置" aria-label="参数设置">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -341,6 +343,181 @@ window.addEventListener('error', function(e){
     <button class="btn" id="exportBtn">导出 CSV（当前数据）</button>
   </div>
 </div>
+
+<script>
+/* ------------------------------------------------------------------
+   i18n: 中 / EN。默认跟随浏览器上次选择（localStorage），也支持 ?lang=en。
+   静态文本在 DOMContentLoaded 时整体替换；动态文本由 T()/fmt*() 负责。
+------------------------------------------------------------------ */
+(function () {
+  var EN = {
+    // ---- header / chrome ----
+    "呼吸监测仪": "Breath Monitor",
+    "呼吸监测仪 · 仪表盘": "Breath Monitor · Dashboard",
+    "SHT4x · 呼吸暂停报警": "SHT4x · apnea alarm",
+    "SHT4x 呼吸活动监测 · 非医疗级诊断 · 由树莓派后端托管时自动进入实时模式":
+      "SHT4x breathing monitor · not a medical device · enters live mode when served by the Pi",
+    "📷 摄像头": "📷 Camera",
+    "📄 睡眠报告": "📄 Sleep report",
+    "实时模式": "LIVE",
+    "演示模式": "Demo",
+    "断线": "offline",
+    // ---- hero / bed ----
+    "离床待机": "Out of bed",
+    "床压低于 0.10 V 时自动开始呼吸测量与报警":
+      "Measurement and alarm start automatically once bed pressure drops below 0.10 V",
+    "床位状态": "Bed status",
+    "床压": "Bed pressure",
+    "呼吸频率": "Breathing rate",
+    "待机中 · 上床后自动开始": "Standby · starts when you get into bed",
+    "离床 · 待机": "Out of bed · standby",
+    "离床 · 等待回床": "Out of bed · waiting for return",
+    "在床 · 测量中": "In bed · measuring",
+    "呼吸平稳 · 无异常": "Breathing steady · no events",
+    "呼吸暂停 · 报警": "Apnea · ALARM",
+    "临近预警": "Warning",
+    "正常呼吸": "Breathing normal",
+    // ---- sensors card ----
+    "口鼻传感器": "Mouth/nose sensors",
+    "口鼻温度": "Temp",
+    "口鼻湿度": "RH",
+    "环境光照": "Ambient light",
+    // ---- live metrics ----
+    "实时指标": "Live metrics",
+    "当前湿度": "Current RH",
+    "温度": "Temperature",
+    "距上次呼吸": "Since last breath",
+    "暂停计时": "Pause timer",
+    "暂停事件": "Pauses",
+    "报警阈值": "Alarm at",
+    "A 状态": "A-state",
+    "相机姿势": "Camera",
+    "心率": "Heart rate",
+    "次": "events",
+    "次/分": "bpm",
+    "待机": "Standby",
+    "清醒": "Awake",
+    "已入睡": "Asleep",
+    "离床": "Out of bed",
+    "未知": "Unknown",
+    "躺下": "Lying",
+    "坐起": "Sitting",
+    "无": "none",
+    "记录中": "logging",
+    "模块异常": "module error",
+    "未接": "not connected",
+    // ---- charts / events ----
+    "实时呼吸信号": "Live breathing signal",
+    "最近 30 秒 · 去基线": "last 30 s · baseline removed",
+    "呼吸暂停事件": "Apnea events",
+    "暂无事件": "No events yet",
+    "历史呼吸频率": "Breathing-rate history",
+    "近 1 小时": "1 h",
+    "近 24 小时": "24 h",
+    // ---- settings panel ----
+    "参数设置": "Settings",
+    "报警阈值（秒，连续无呼吸即报警）": "Alarm threshold (seconds without breathing)",
+    "预警阈值（秒，临近报警的提醒）": "Warning threshold (seconds, before the alarm)",
+    "呼吸阈值 thUp（%RH，信号向上越过记为呼气）":
+      "Breathing threshold thUp (%RH, upward crossing = exhale)",
+    "FSR 阈值预设（V；先取三档，实测后替换）":
+      "FSR preset (V; replace with your measured value)",
+    "0.05 V（轻压）": "0.05 V (light)",
+    "0.10 V（默认）": "0.10 V (default)",
+    "0.20 V（重压）": "0.20 V (heavy)",
+    "FSR 极性反转（压力升高电压）": "Invert FSR polarity (pressing raises the voltage)",
+    "触发线 0.10 V · 低于/高于按极性判断": "Trigger 0.10 V · below/above depends on polarity",
+    "导出 CSV（当前数据）": "Export CSV (current data)",
+    "实时模式（连接树莓派）": "Live mode (connect to the Pi)",
+    "后端地址（如 192.168.1.20:8000）": "Backend host (e.g. 192.168.1.20:8000)",
+    // ---- dynamic pieces ----
+    "触发线": "Trigger",
+    "高于触发": "above fires",
+    "低于触发": "below fires",
+    "原始": "raw",
+    "秒": "s",
+    "已": "",
+    "连续无呼吸": "No breathing for",
+    "未检测到呼吸": "no breathing detected"
+  };
+
+  var param = new URLSearchParams(location.search).get("lang");
+  var saved = null;
+  try { saved = localStorage.getItem("dsh-lang"); } catch (e) {}
+  var lang = (param || saved || "zh").toLowerCase();
+  window.LANG = lang.indexOf("en") === 0 ? "en" : "zh";
+
+  window.T = function (s) {
+    if (window.LANG !== "en") return s;
+    return Object.prototype.hasOwnProperty.call(EN, s) ? EN[s] : s;
+  };
+  window.isEN = function () { return window.LANG === "en"; };
+
+  window.fmtNoBreath = function (s) {
+    return window.LANG === "en" ? "No breathing for " + s + " s"
+                                : "已连续无呼吸 " + s + " 秒";
+  };
+  window.fmtWarn = function (s) {
+    return window.LANG === "en" ? "No breathing detected for " + s + " s"
+                                : "已 " + s + " 秒未检测到呼吸";
+  };
+  window.fmtOffline = function (s) {
+    return window.LANG === "en" ? "offline " + s + "s" : "断线 " + s + " s";
+  };
+  window.fmtTrigger = function (v, inv) {
+    return window.LANG === "en"
+      ? "Trigger " + Number(v).toFixed(2) + " V · " + (inv ? "above fires" : "below fires")
+      : "触发线 " + Number(v).toFixed(2) + " V · " + (inv ? "高于触发" : "低于触发");
+  };
+  window.fmtRaw = function (label, age, dark) {
+    return window.LANG === "en"
+      ? "raw " + label + age + (dark ? " (dark · ignored)" : "")
+      : "原始 " + label + age + (dark ? "（暗·不计票）" : "");
+  };
+  window.fmtDur = function (s) {
+    return window.LANG === "en" ? s + " s" : s + " 秒";
+  };
+
+  window.setLang = function (next) {
+    try { localStorage.setItem("dsh-lang", next); } catch (e) {}
+    var u = new URL(location.href);
+    u.searchParams.set("lang", next);
+    location.href = u.toString();
+  };
+
+  function translateDom() {
+    var rl = document.getElementById("reportLink");
+    if (rl) rl.href = "/api/report?hours=12&lang=" + window.LANG;
+    if (window.LANG !== "en") return;
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode: function (n) {
+        return /[\u4e00-\u9fff]/.test(n.nodeValue) ? NodeFilter.FILTER_ACCEPT
+                                                   : NodeFilter.FILTER_REJECT;
+      }
+    });
+    var nodes = [], n;
+    while ((n = walker.nextNode())) nodes.push(n);
+    nodes.forEach(function (node) {
+      var key = node.nodeValue.trim();
+      if (Object.prototype.hasOwnProperty.call(EN, key)) {
+        node.nodeValue = node.nodeValue.replace(key, EN[key]);
+      }
+    });
+    document.querySelectorAll("[title],[placeholder]").forEach(function (el) {
+      ["title", "placeholder"].forEach(function (attr) {
+        var v = el.getAttribute(attr);
+        if (v && Object.prototype.hasOwnProperty.call(EN, v.trim())) {
+          el.setAttribute(attr, EN[v.trim()]);
+        }
+      });
+    });
+    var btn = document.getElementById("langBtn");
+    if (btn) btn.textContent = "中";
+  }
+
+  document.addEventListener("DOMContentLoaded", translateDom);
+})();
+</script>
 
 <script>
 (function(){
@@ -518,7 +695,7 @@ window.addEventListener('error', function(e){
     }
     const st = $("bedState");
     if(st){
-      st.textContent = standby ? "离床 · 待机" : "在床 · 测量中";
+      st.textContent = T(standby ? "离床 · 待机" : "在床 · 测量中");
       st.className = "bed-state" + (standby ? "" : " on");
     }
   }
@@ -528,15 +705,21 @@ window.addEventListener('error', function(e){
       const gap = aState === "gap";
       setState("standby",
         gap ? "离床 · 等待回床" : "离床 · 待机",
-        gap ? "FSR 已卸载；15 分钟内回来算同一晚，超时结束本次会话"
-            : "FSR 触发线 " + cfg.fsr.toFixed(2) + " V；极性 " + (cfg.fsrInvert ? "反相" : "正相"));
+        gap ? (window.isEN()
+                ? "FSR released; returning within 15 min counts as the same night"
+                : "FSR 已卸载；15 分钟内回来算同一晚，超时结束本次会话")
+            : (window.isEN()
+                ? "FSR trigger " + cfg.fsr.toFixed(2) + " V · " +
+                  (cfg.fsrInvert ? "inverted" : "normal") + " polarity"
+                : "FSR 触发线 " + cfg.fsr.toFixed(2) + " V；极性 " +
+                  (cfg.fsrInvert ? "反相" : "正相")));
       $("bpmBig").textContent = "—";
       $("sinceVal").innerHTML = "—";
       $("apneaVal").innerHTML = "—";
       $("countVal").innerHTML = "—";
     }
     const hint = $("bedHint");
-    if(hint) hint.textContent = "触发线 " + cfg.fsr.toFixed(2) + " V · " + (cfg.fsrInvert ? "高于触发" : "低于触发");
+    if(hint) hint.textContent = fmtTrigger(cfg.fsr, cfg.fsrInvert);
   }
 
   function setState(mode, text, sub){
@@ -544,8 +727,8 @@ window.addEventListener('error', function(e){
     hero.classList.remove("normal","warn","alarm","standby");
     st.classList.remove("normal","warn","alarm","standby");
     hero.classList.add(mode); st.classList.add(mode);
-    $("stateText").textContent = text;
-    $("stateSub").textContent = sub;
+    $("stateText").textContent = T(text);
+    $("stateSub").textContent = T(sub);
   }
   function updateUI(signal, humidity, temp, since, apnea, warn){
     const bpm = bpmNow();
@@ -559,17 +742,17 @@ window.addEventListener('error', function(e){
     if(apnea){
       apneaVal.innerHTML = Math.floor(since - cfg.apneaSec)+'<span class="u">s</span>';
       apneaVal.className = "v bad"; sinceVal.className = "v bad";
-      setState("alarm","呼吸暂停 · 报警","已连续无呼吸 "+(since - cfg.apneaSec).toFixed(0)+" 秒");
+      setState("alarm", T("呼吸暂停 · 报警"), fmtNoBreath((since - cfg.apneaSec).toFixed(0)));
     } else if(warn){
       apneaVal.innerHTML = "0<span class=\"u\">s</span>";
       apneaVal.className = "v warn"; sinceVal.className = "v warn";
-      setState("warn","临近预警","已 "+since.toFixed(0)+" 秒未检测到呼吸");
+      setState("warn", T("临近预警"), fmtWarn(since.toFixed(0)));
     } else {
       apneaVal.innerHTML = "0<span class=\"u\">s</span>";
       apneaVal.className = "v ok"; sinceVal.className = "v ok";
-      setState("normal","正常呼吸","呼吸平稳 · 无异常");
+      setState("normal", T("正常呼吸"), T("呼吸平稳 · 无异常"));
     }
-    countVal.innerHTML = S.eventCount+'<span class="u">次</span>';
+    countVal.innerHTML = S.eventCount+'<span class="u">'+T("次")+'</span>';
     countVal.className = S.eventCount ? "v warn" : "v ok";
 
     const scale = clamp(1 + signal/9, 0.82, 1.35);
@@ -577,9 +760,9 @@ window.addEventListener('error', function(e){
   }
   function renderEvents(list){
     const ul = $("eventsList");
-    if(!list || !list.length){ ul.innerHTML = '<li class="empty">暂无事件</li>'; return; }
+    if(!list || !list.length){ ul.innerHTML = '<li class="empty">'+T("暂无事件")+'</li>'; return; }
     ul.innerHTML = list.slice(0,12).map(e =>
-      '<li><span class="t">'+fmtClock(e.t != null ? e.t : e.x)+'</span><span class="d">'+e.dur.toFixed(0)+' 秒</span></li>'
+      '<li><span class="t">'+fmtClock(e.t != null ? e.t : e.x)+'</span><span class="d">'+fmtDur(e.dur.toFixed(0))+'</span></li>'
     ).join("");
   }
 
@@ -645,19 +828,19 @@ window.addEventListener('error', function(e){
         }
         const rawEl = $("camRaw");
         if(rawEl){
-          const rl = {lying:"躺下", sitting:"坐起"}[m.camera_raw] || "无";
+          const rl = T({lying:"躺下", sitting:"坐起"}[m.camera_raw] || "无");
           const age = (m.camera_raw_age === null || m.camera_raw_age === undefined)
             ? "" : " · " + Number(m.camera_raw_age).toFixed(0) + "s";
           const gate = (m.lux != null && cfg.luxDark != null && m.lux < cfg.luxDark) ? "（暗·不计票）" : "";
           // sub-line of the 相机姿势 tile: raw browser verdict + freshness
-          rawEl.textContent = "原始 " + rl + age + gate;
+          rawEl.textContent = fmtRaw(rl, age, gate !== "");
         }
         put("spo2Val", m.spo2, 1);
         put("hrVal", m.hr, 0);
         const spEl = $("spo2State");
-        if(spEl) spEl.textContent = ({running:"记录中", idle:"待机", exited:"模块异常", absent:"未接"})[m.spo2_state] || "—";
-        const aLabel = {standby:"待机", awake:"清醒", asleep:"已入睡", gap:"离床"}[m.a_state] || (m.standby ? "待机" : "—");
-        const camLabel = {lying:"躺下", sitting:"坐起"}[m.camera_posture] || "未知";
+        if(spEl) spEl.textContent = T(({running:"记录中", idle:"待机", exited:"模块异常", absent:"未接"})[m.spo2_state] || "—");
+        const aLabel = T({standby:"待机", awake:"清醒", asleep:"已入睡", gap:"离床"}[m.a_state] || (m.standby ? "待机" : "—"));
+        const camLabel = T({lying:"躺下", sitting:"坐起"}[m.camera_posture] || "未知");
         const aEl = $("aState"), cEl = $("cameraPosture");
         if(aEl){ aEl.textContent = aLabel; aEl.className = "v " + (m.a_state === "asleep" ? "ok" : "warn"); }
         if(cEl){ cEl.textContent = camLabel; cEl.className = "v " + (m.camera_posture ? "ok" : "warn"); }
@@ -696,7 +879,7 @@ window.addEventListener('error', function(e){
       const age = (Date.now() - lastMsgAt) / 1000;
       if(age > 4){
         setSourceBadge(false);
-        $("srcText").textContent = "断线 " + Math.round(age) + " s";
+        $("srcText").textContent = fmtOffline(Math.round(age));
         scheduleReconnect();
       }
     }, 1000);
@@ -707,7 +890,7 @@ window.addEventListener('error', function(e){
   function setSourceBadge(live){
     cfg.connected = live;
     const b = $("srcBadge"); b.classList.toggle("live", live);
-    $("srcText").textContent = live ? "实时模式" : (cfg.live ? "断线" : "演示模式");
+    $("srcText").textContent = T(live ? "实时模式" : (cfg.live ? "断线" : "演示模式"));
   }
   function pushConfig(){
     if(!cfg.live) return;
@@ -736,7 +919,7 @@ window.addEventListener('error', function(e){
       if(ws){ try{ws.close();}catch(e){} ws=null; }
       stopLiveTimer();
       setSourceBadge(false);
-      $("srcText").textContent = "演示模式";
+      $("srcText").textContent = T("演示模式");
     }
   });
   $("thUp").addEventListener("change", e=>{ cfg.thUp = clamp(+e.target.value||1.2, 0.1, 5); pushConfig(); });
