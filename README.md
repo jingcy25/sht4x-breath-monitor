@@ -65,6 +65,16 @@ python3 -m pip install --break-system-packages -r spo2/requirements.txt
 
 # 启动（演示可把 sleep-onset 降到 60 s，正式用 300 s）
 python3 -u breath_server.py --port 8000 --sleep-onset 300
+# 若环境 SHT4x 已接在 i2c-3，并已启用 overlay，再加 --env-i2c3
+```
+
+systemd（可选，推荐）：
+
+```bash
+sudo cp systemd/breath-monitor.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now breath-monitor
+sudo systemctl status breath-monitor --no-pager
 ```
 
 打开：

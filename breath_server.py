@@ -19,6 +19,8 @@ import json
 import math
 import os
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -165,6 +167,7 @@ config = {
     "sleep_onset_s": 300.0,             # 5 min; demo can lower
     "lux_dark": 10.0,
     "warn_sec": 10.0,
+    "env_i2c3": False,                  # enable only when the i2c-3 SHT4x is wired
 }
 cfg_lock = threading.Lock()
 
@@ -242,6 +245,31 @@ def init_db():
     conn.close()
 
 
+def _i2c_present(bus: int, addr: int, timeout_s: float = 1.5) -> bool:
+    """Probe an I2C address in a child process.
+
+    A missing SHT4x (or a software I2C bus with no device) can block an
+    ``smbus2`` read indefinitely. Probing with ``timeout`` keeps the main
+    acquisition loop alive when a sensor is unplugged.
+    """
+    code = (
+        "import smbus2; "
+        "b=smbus2.SMBus(%d); "
+        "print(b.read_byte(%d)); "
+        "b.close()" % (bus, addr)
+    )
+    try:
+        proc = subprocess.run(
+            ["timeout", str(timeout_s), sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s + 1.0,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # A-layer helpers
 # ---------------------------------------------------------------------------
@@ -276,30 +304,46 @@ def _a_confidence(in_bed, posture, lux):
 # acquisition / fusion loop
 # ---------------------------------------------------------------------------
 def sensor_loop():
-    try:
-        breath_sensor = breath_sensors.SHT4x(1)
-    except Exception as exc:
+    if _i2c_present(1, 0x44):
+        try:
+            breath_sensor = breath_sensors.SHT4x(1)
+        except Exception as exc:
+            breath_sensor = None
+            print("SHT4x breath sensor unavailable: %s" % exc, flush=True)
+    else:
         breath_sensor = None
-        print("SHT4x breath sensor unavailable: %s" % exc, flush=True)
+        print("SHT4x breath sensor not found at 0x44 (i2c-1)", flush=True)
 
-    try:
-        env_sensor = breath_sensors.SHT4x(3)
-        print("environment SHT4x: i2c-3", flush=True)
-    except Exception as exc:
+    if config.get("env_i2c3") and _i2c_present(3, 0x44):
+        try:
+            env_sensor = breath_sensors.SHT4x(3)
+            print("environment SHT4x: i2c-3", flush=True)
+        except Exception as exc:
+            env_sensor = None
+            print("environment SHT4x unavailable (i2c-3): %s" % exc, flush=True)
+    else:
         env_sensor = None
-        print("environment SHT4x unavailable (i2c-3): %s" % exc, flush=True)
+        print("environment SHT4x disabled (pass --env-i2c3 when wired)", flush=True)
 
-    try:
-        light_sensor = breath_sensors.VEML7700(1)
-    except Exception as exc:
+    if _i2c_present(1, 0x10):
+        try:
+            light_sensor = breath_sensors.VEML7700(1)
+        except Exception as exc:
+            light_sensor = None
+            print("VEML7700 unavailable: %s" % exc, flush=True)
+    else:
         light_sensor = None
-        print("VEML7700 unavailable: %s" % exc, flush=True)
+        print("VEML7700 not found at 0x10 (i2c-1)", flush=True)
 
-    try:
-        adc = breath_sensors.ADS1115(1)
-    except Exception as exc:
+    if _i2c_present(1, 0x48):
+        try:
+            adc = breath_sensors.ADS1115(1)
+        except Exception as exc:
+            adc = None
+            print("ADS1115 unavailable: %s" % exc, flush=True)
+    else:
         adc = None
-        print("ADS1115 unavailable: %s" % exc, flush=True)
+        print("ADS1115 not found at 0x48 (i2c-1)", flush=True)
 
     env_temp = env_hum = None
     lux = None
@@ -750,6 +794,7 @@ def main():
     ap.add_argument("--fsr", type=float, default=0.100)
     ap.add_argument("--fsr-invert", action="store_true")
     ap.add_argument("--sleep-onset", type=float, default=300.0)
+    ap.add_argument("--env-i2c3", action="store_true")
     args = ap.parse_args()
 
     DB = args.db
@@ -758,6 +803,7 @@ def main():
     config["fsr_in_bed"] = args.fsr
     config["fsr_invert"] = bool(args.fsr_invert)
     config["sleep_onset_s"] = args.sleep_onset
+    config["env_i2c3"] = bool(args.env_i2c3)
 
     init_db()
 
