@@ -43,6 +43,9 @@ except Exception as exc:
     print("alarm GPIO unavailable: %s" % exc, flush=True)
 
 
+alarm_event = threading.Event()
+
+
 def alarm_worker():
     """Three short beeps with a pause between bursts, LED in sync."""
     while True:
@@ -109,7 +112,6 @@ latest_lock = threading.Lock()
 clients = []
 clients_lock = threading.Lock()
 apnea_start = {"v": None}
-alarm_event = threading.Event()
 
 
 def init_db():
