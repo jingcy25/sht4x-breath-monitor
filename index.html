@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<link rel="icon" href="data:,">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>呼吸监测仪 · 仪表盘</title>
 <!--
@@ -630,6 +631,12 @@ window.addEventListener('error', function(e){
         put("envTemp", m.temp, 1);
         put("envHum", m.humidity, 1);
         put("lux", m.lux, 1);
+        // In standby the live tiles would otherwise keep their placeholder
+        // values while the 口鼻 SHT4x is already reporting.
+        if(standby){
+          if(m.humidity != null) $("humVal").innerHTML = Number(m.humidity).toFixed(1)+'<span class="u">%RH</span>';
+          if(m.temp != null) $("tempVal").innerHTML = Number(m.temp).toFixed(1)+'<span class="u">°C</span>';
+        }
         const rawEl = $("camRaw");
         if(rawEl){
           const rl = {lying:"躺下", sitting:"坐起"}[m.camera_raw] || "无";
