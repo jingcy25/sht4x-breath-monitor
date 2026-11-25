@@ -43,6 +43,34 @@ except Exception as exc:
     print("alarm GPIO unavailable: %s" % exc, flush=True)
 
 
+def alarm_worker():
+    """Three short beeps with a pause between bursts, LED in sync."""
+    while True:
+        if not alarm_event.is_set():
+            if GPIO_OK:
+                GPIO.output(17, 0)
+                GPIO.output(27, 0)
+            time.sleep(0.05)
+            continue
+        for _ in range(3):
+            if not alarm_event.is_set():
+                break
+            GPIO.output(17, 1)
+            GPIO.output(27, 1)
+            time.sleep(0.15)
+            GPIO.output(17, 0)
+            GPIO.output(27, 0)
+            if not alarm_event.is_set():
+                break
+            time.sleep(0.15)
+        if alarm_event.is_set():
+            time.sleep(0.9)
+
+
+if GPIO_OK:
+    threading.Thread(target=alarm_worker, daemon=True).start()
+
+
 class BreathDetector:
     """基于湿度偏离基线的呼吸检测器（带迟滞）。"""
 
@@ -81,6 +109,7 @@ latest_lock = threading.Lock()
 clients = []
 clients_lock = threading.Lock()
 apnea_start = {"v": None}
+alarm_event = threading.Event()
 
 
 def init_db():
@@ -143,9 +172,10 @@ def sensor_loop():
 
             apnea = (t - last_breath) > apnea_sec
 
-            if GPIO_OK:
-                GPIO.output(17, 1 if apnea else 0)
-                GPIO.output(27, 1 if apnea else 0)
+            if apnea:
+                alarm_event.set()
+            else:
+                alarm_event.clear()
 
             # 呼吸暂停事件记录
             if apnea and apnea_start["v"] is None:
@@ -232,12 +262,14 @@ def chart_js():
 def test_alarm():
     if not GPIO_OK:
         return jsonify({"ok": False, "error": "gpio unavailable"})
-    GPIO.output(17, 1)
-    GPIO.output(27, 1)
-    time.sleep(0.6)
-    GPIO.output(17, 0)
-    GPIO.output(27, 0)
-    return jsonify({"ok": True})
+    for _ in range(3):
+        GPIO.output(17, 1)
+        GPIO.output(27, 1)
+        time.sleep(0.15)
+        GPIO.output(17, 0)
+        GPIO.output(27, 0)
+        time.sleep(0.15)
+    return jsonify({"ok": True, "pattern": "3 beeps"})
 
 
 @app.route("/api/status")
