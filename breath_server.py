@@ -27,6 +27,20 @@ from collections import deque
 import breath_sensors
 from flask import Flask, jsonify, request, Response, send_from_directory
 from flask_sock import Sock
+import atexit
+
+try:
+    import RPi.GPIO as GPIO
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(17, GPIO.OUT, initial=GPIO.LOW)
+    GPIO.setup(27, GPIO.OUT, initial=GPIO.LOW)
+    atexit.register(GPIO.cleanup)
+    GPIO_OK = True
+    print("alarm GPIO ready: buzzer=GPIO17 led=GPIO27", flush=True)
+except Exception as exc:
+    GPIO = None
+    GPIO_OK = False
+    print("alarm GPIO unavailable: %s" % exc, flush=True)
 
 
 class BreathDetector:
@@ -129,6 +143,10 @@ def sensor_loop():
 
             apnea = (t - last_breath) > apnea_sec
 
+            if GPIO_OK:
+                GPIO.output(17, 1 if apnea else 0)
+                GPIO.output(27, 1 if apnea else 0)
+
             # 呼吸暂停事件记录
             if apnea and apnea_start["v"] is None:
                 apnea_start["v"] = last_breath + apnea_sec
@@ -208,6 +226,18 @@ def index():
 @app.route("/chart.umd.min.js")
 def chart_js():
     return send_from_directory(os.getcwd(), "chart.umd.min.js")
+
+
+@app.route("/api/test_alarm")
+def test_alarm():
+    if not GPIO_OK:
+        return jsonify({"ok": False, "error": "gpio unavailable"})
+    GPIO.output(17, 1)
+    GPIO.output(27, 1)
+    time.sleep(0.6)
+    GPIO.output(17, 0)
+    GPIO.output(27, 0)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/status")
