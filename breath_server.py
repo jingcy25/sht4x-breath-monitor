@@ -193,6 +193,18 @@ camera_jpeg_lock = threading.Lock()
 camera_frame_ts = 0.0
 camera_frame_bytes = 0
 
+# The camera only runs while somebody is watching. Keeping a UVC camera
+# streaming 24/7 is what browns out a Pi Zero 2W on a shared 5 V rail, so the
+# capture thread releases the device after this many seconds without demand.
+camera_demand = 0.0
+CAMERA_IDLE_S = 15.0
+
+
+def camera_touch():
+    """Mark that a viewer wants frames (called by the HTTP endpoints)."""
+    global camera_demand
+    camera_demand = time.time()
+
 # Sensor handles published by the acquisition loop so /api/selftest can probe
 # the same objects without opening a second bus handle.
 dev_lock = threading.Lock()
@@ -220,8 +232,9 @@ def camera_loop():
     """Single camera reader; MJPEG clients consume the latest JPEG.
 
     Opening ``cv2.VideoCapture`` inside a Flask streaming generator can block
-    the first response on some UVC cameras. A background reader is more robust
-    and supports multiple viewers.
+    the first response on some UVC cameras, so a background reader owns the
+    device.  It only holds the device while a viewer is active: a UVC camera
+    streaming forever is a real brown-out risk on a Pi Zero 2W.
     """
     try:
         import cv2
@@ -229,40 +242,62 @@ def camera_loop():
         print("camera: OpenCV unavailable: %s" % exc, flush=True)
         return
     global camera_jpeg, camera_frame_ts, camera_frame_bytes
+    cap = None
     while True:
-        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            print("camera: /dev/video0 open failed; retrying", flush=True)
-            time.sleep(3.0)
+        if (time.time() - camera_demand) > CAMERA_IDLE_S:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                cap = None
+                print("camera: idle, device released", flush=True)
+            time.sleep(1.0)
             continue
-        try:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-            cap.set(cv2.CAP_PROP_FPS, 5)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if cap is None:
+            cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                cap = None
+                print("camera: /dev/video0 open failed; retrying", flush=True)
+                time.sleep(3.0)
+                continue
+            try:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+                cap.set(cv2.CAP_PROP_FPS, 5)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
             print("camera: /dev/video0 opened", flush=True)
-            while True:
-                ok, frame = cap.read()
-                if not ok:
-                    print("camera: read failed; reopening", flush=True)
-                    break
-                ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-                if ok:
-                    data = jpg.tobytes()
-                    with camera_jpeg_lock:
-                        camera_jpeg = data
-                    camera_frame_ts = time.time()
-                    camera_frame_bytes = len(data)
-                time.sleep(0.03)
+        try:
+            ok, frame = cap.read()
+            if not ok:
+                print("camera: read failed; reopening", flush=True)
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                cap = None
+                time.sleep(1.0)
+                continue
+            ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            if ok:
+                data = jpg.tobytes()
+                with camera_jpeg_lock:
+                    camera_jpeg = data
+                camera_frame_ts = time.time()
+                camera_frame_bytes = len(data)
         except Exception as exc:
             print("camera loop error: %s" % exc, flush=True)
-        finally:
             try:
                 cap.release()
             except Exception:
                 pass
-        time.sleep(1.0)
+            cap = None
+            time.sleep(1.0)
+            continue
+        time.sleep(0.03)
 
 
 # ---------------------------------------------------------------------------
@@ -742,9 +777,12 @@ def chart_js():
 
 @app.route("/video_feed")
 def video_feed():
+    camera_touch()
+
     def gen():
         last = None
         while True:
+            camera_touch()
             with camera_jpeg_lock:
                 jpg = camera_jpeg
             if jpg and jpg is not last:
@@ -759,8 +797,13 @@ def video_feed():
 
 @app.route("/snapshot")
 def snapshot():
-    with camera_jpeg_lock:
-        jpg = camera_jpeg
+    camera_touch()
+    for _ in range(40):  # give the capture thread time to open the device
+        with camera_jpeg_lock:
+            jpg = camera_jpeg
+        if jpg:
+            break
+        time.sleep(0.1)
     if not jpg:
         return Response("camera not ready", status=503, mimetype="text/plain")
     return Response(jpg, mimetype="image/jpeg")
@@ -768,6 +811,7 @@ def snapshot():
 
 @app.route("/api/camera", methods=["POST"])
 def api_camera():
+    camera_touch()
     data = request.get_json(silent=True) or {}
     posture = str(data.get("posture", "unknown")).lower()
     if posture not in ("lying", "sitting", "unknown"):
