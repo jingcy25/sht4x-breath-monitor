@@ -17,6 +17,7 @@
 """
 import argparse
 import json
+import os
 import math
 import sqlite3
 import threading
@@ -201,12 +202,12 @@ sock = Sock(app)
 
 @app.route("/")
 def index():
-    return send_from_directory(".", "index.html")
+    return send_from_directory(os.getcwd(), "index.html")
 
 
 @app.route("/chart.umd.min.js")
 def chart_js():
-    return send_from_directory(".", "chart.umd.min.js")
+    return send_from_directory(os.getcwd(), "chart.umd.min.js")
 
 
 @app.route("/api/status")
