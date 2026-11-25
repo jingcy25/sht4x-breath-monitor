@@ -247,11 +247,12 @@ window.addEventListener('error', function(e){
       </div>
 
       <div class="card" style="margin-top:18px">
-        <h2>环境读数 <span>第二路 SHT4x · VEML7700</span></h2>
+        <h2>口鼻传感器 <span>SHT4x 0x44 · VEML7700 0x10</span></h2>
         <div class="rail">
-          <div class="cell"><div class="k">环境温度</div><div class="v"><span id="envTemp">--</span><span class="u">°C</span></div></div>
-          <div class="cell"><div class="k">环境湿度</div><div class="v"><span id="envHum">--</span><span class="u">%</span></div></div>
+          <div class="cell"><div class="k">口鼻温度</div><div class="v"><span id="envTemp">--</span><span class="u">°C</span></div></div>
+          <div class="cell"><div class="k">口鼻湿度</div><div class="v"><span id="envHum">--</span><span class="u">%</span></div></div>
           <div class="cell"><div class="k">环境光照</div><div class="v"><span id="lux">--</span><span class="u">lx</span></div></div>
+          <div class="cell"><div class="k">相机原始</div><div class="v" id="camRaw">--</div></div>
         </div>
       </div>
 
@@ -351,7 +352,7 @@ window.addEventListener('error', function(e){
   const fmtHM = ts => new Date(ts*1000).toLocaleTimeString("zh-CN",{hour12:false,hour:"2-digit",minute:"2-digit"});
   const isHttp = location.protocol === "http:" || location.protocol === "https:";
 
-  const cfg = { thUp: 1.2, apneaSec: 20, warnSec: 10, liveWindow: 30, live: false, host: "raspberrypi.local:8000", fsr: 0.10, fsrInvert: false };
+  const cfg = { thUp: 1.2, apneaSec: 20, warnSec: 10, liveWindow: 30, live: false, host: "raspberrypi.local:8000", fsr: 0.10, fsrInvert: false, luxDark: 10 };
 
   const S = {
     t: 0, period: 4.0, amp: 3.2, baseline: 45.0, tempBase: 26.4,
@@ -626,9 +627,18 @@ window.addEventListener('error', function(e){
           const el = $(id);
           if(el) el.textContent = (v === null || v === undefined || isNaN(v)) ? "--" : Number(v).toFixed(d);
         };
-        put("envTemp", m.env_temp, 1);
-        put("envHum", m.env_hum, 1);
+        put("envTemp", m.temp, 1);
+        put("envHum", m.humidity, 1);
         put("lux", m.lux, 1);
+        const rawEl = $("camRaw");
+        if(rawEl){
+          const rl = {lying:"躺下", sitting:"坐起"}[m.camera_raw] || "无";
+          const age = (m.camera_raw_age === null || m.camera_raw_age === undefined)
+            ? "" : " · " + Number(m.camera_raw_age).toFixed(0) + "s";
+          const gate = (m.lux != null && cfg.luxDark != null && m.lux < cfg.luxDark) ? "（暗·不计票）" : "";
+          rawEl.textContent = rl + age + gate;
+          rawEl.className = "v " + (m.camera_raw ? "ok" : "warn");
+        }
         put("spo2Val", m.spo2, 1);
         put("hrVal", m.hr, 0);
         const aLabel = {standby:"待机", awake:"清醒", asleep:"已入睡", gap:"离床"}[m.a_state] || (m.standby ? "待机" : "—");
