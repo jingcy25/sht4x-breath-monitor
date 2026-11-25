@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/sht4x-breath-monitor
-ExecStart=/usr/bin/python3 -u /home/pi/sht4x-breath-monitor/breath_server.py --port 8000 --sleep-onset 60
+ExecStart=/usr/bin/python3 -u /home/pi/sht4x-breath-monitor/breath_server.py --port 8000 --sleep-onset 5 --no-fsr-motion
 Restart=always
 RestartSec=3
 

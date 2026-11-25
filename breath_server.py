@@ -164,6 +164,12 @@ config = {
     "fsr_invert": False,                # True if pressure increases voltage
     "fsr_hyst": 0.030,
     "fsr_debounce_s": 10.0,
+    # FSR motion gating.  Set fsr_motion_gate=False (--no-fsr-motion) to let a
+    # session fall asleep and stay asleep regardless of bed-pressure jitter --
+    # needed while the FSR is uncalibrated or floating.
+    "fsr_motion_gate": True,
+    "fsr_motion_max": 0.05,   # motion ceiling while falling asleep
+    "fsr_motion_wake": 0.08,  # motion that wakes an already-asleep session
     "sleep_onset_s": 300.0,             # 5 min; demo can lower
     "lux_dark": 10.0,
     "warn_sec": 10.0,
@@ -522,6 +528,9 @@ def sensor_loop():
                 apnea_sec = float(config["apnea_sec"])
                 sleep_onset_s = float(config["sleep_onset_s"])
                 lux_dark = float(config["lux_dark"])
+                motion_gate = bool(config["fsr_motion_gate"])
+                motion_max = float(config["fsr_motion_max"])
+                motion_wake = float(config["fsr_motion_wake"])
                 det.th_up = float(config["th_up"])
 
             if fsr is None:
@@ -552,7 +561,7 @@ def sensor_loop():
                     spo2_worker.start()
                 elif not in_bed and spo2_worker is not None:
                     spo2_worker.stop()
-                print("bed state: %s" % ("in_bed" if in_bed else "standby"), flush=True)
+                print("bed state: %s (a_state=%s)" % ("in_bed" if in_bed else "out_of_bed", a_state), flush=True)
 
             # slow sensors (VEML only; environment SHT4x removed)
             if (t - last_slow) > 2.0:
@@ -615,7 +624,7 @@ def sensor_loop():
                     a_state = "awake"
                     sleep_since = None
                 elif sleep_context:
-                    if regular and fsr_motion < 0.05:
+                    if regular and (not motion_gate or fsr_motion < motion_max):
                         if sleep_since is None:
                             sleep_since = t
                         if (t - sleep_since) >= sleep_onset_s:
@@ -631,7 +640,7 @@ def sensor_loop():
                     sleep_since = None
                     a_state = "awake"
 
-                if fsr_motion > 0.08 and a_state == "asleep":
+                if motion_gate and fsr_motion > motion_wake and a_state == "asleep":
                     a_state = "awake"
 
                 apnea = a_state == "asleep" and (t - last_breath) > apnea_sec
@@ -955,7 +964,9 @@ def api_selftest():
     }
 
     out["config"] = {k: config[k] for k in ("fsr_in_bed", "fsr_invert", "th_up",
-                                            "apnea_sec", "lux_dark", "sleep_onset_s")}
+                                            "apnea_sec", "lux_dark", "sleep_onset_s",
+                                            "fsr_motion_gate", "fsr_motion_max",
+                                            "fsr_motion_wake")}
     return jsonify(out)
 
 
@@ -975,6 +986,12 @@ def api_config():
             config["sleep_onset_s"] = float(data["sleep_onset_s"])
         if "lux_dark" in data:
             config["lux_dark"] = float(data["lux_dark"])
+        if "fsr_motion_gate" in data:
+            config["fsr_motion_gate"] = bool(data["fsr_motion_gate"])
+        if "fsr_motion_max" in data:
+            config["fsr_motion_max"] = float(data["fsr_motion_max"])
+        if "fsr_motion_wake" in data:
+            config["fsr_motion_wake"] = float(data["fsr_motion_wake"])
         return jsonify({"ok": True, "config": dict(config)})
 
 
@@ -1020,6 +1037,12 @@ def main():
     ap.add_argument("--apnea", type=float, default=20.0)
     ap.add_argument("--fsr", type=float, default=0.100)
     ap.add_argument("--fsr-invert", action="store_true")
+    ap.add_argument(
+        "--no-fsr-motion",
+        action="store_true",
+        help="ignore FSR motion entirely (both the fall-asleep ceiling and the "
+             "wake-on-motion rule); useful while the FSR is uncalibrated",
+    )
     ap.add_argument("--sleep-onset", type=float, default=300.0)
     args = ap.parse_args()
 
@@ -1029,6 +1052,8 @@ def main():
     config["fsr_in_bed"] = args.fsr
     config["fsr_invert"] = bool(args.fsr_invert)
     config["sleep_onset_s"] = args.sleep_onset
+    if args.no_fsr_motion:
+        config["fsr_motion_gate"] = False
 
     init_db()
 
@@ -1045,6 +1070,9 @@ def main():
     print("呼吸监测后端已启动: http://0.0.0.0:%d" % args.port, flush=True)
     print("FSR preset=%.3f V (invert=%s); camera=/camera; SpO2=1 Hz log-only"
           % (config["fsr_in_bed"], config["fsr_invert"]), flush=True)
+    print("sleep onset=%.0f s; FSR motion gate=%s"
+          % (config["sleep_onset_s"], "on" if config["fsr_motion_gate"] else "OFF"),
+          flush=True)
     app.run(host="0.0.0.0", port=args.port, threaded=True)
 
 

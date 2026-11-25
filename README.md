@@ -54,7 +54,17 @@ python3 -m pip install --break-system-packages -r spo2/requirements.txt
 
 # 启动（演示可把 sleep-onset 降到 60 s，正式用 300 s）
 python3 -u breath_server.py --port 8000 --sleep-onset 300
+
+# 联调/演示（FSR 未标定、只想快点看到 ASLEEP 与报警链路）
+python3 -u breath_server.py --port 8000 --sleep-onset 5 --no-fsr-motion
 ```
+
+`--no-fsr-motion` 把 FSR 体动**完全**从判据里摘掉：
+
+- 入睡不再要求“体动够小”（`fsr_motion < fsr_motion_max`）
+- ASLEEP 之后也不会因为体动被唤醒
+
+FSR 悬空时 `fsr_motion` 常驻 0.3 左右，开着这道门就会永远进不了 ASLEEP。FSR 标定好、`/api/selftest` 显示 `verdict=stable` 之后，去掉这个开关即可恢复“低体动入睡 + 翻身唤醒”。运行时也能改：`POST /api/config {"fsr_motion_gate": true, "sleep_onset_s": 300}`。
 
 systemd（可选，推荐）：
 
