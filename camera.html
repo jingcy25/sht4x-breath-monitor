@@ -62,6 +62,43 @@
 </div>
 
 <script src="/static/js/tf.min.js"></script>
+<script>
+  /*
+   * teachablemachine-pose.min.js carries an older tfjs-core whose
+   * tf.browser.fromPixels() op calls ENGINE.fromPixels(...).  tfjs 1.7.4
+   * dropped Engine.fromPixels (it moved into the browser op), and both
+   * bundles share the one engine singleton on window._tfengine, so the TM
+   * copy inherits the 1.7.4 engine and dies with
+   * "Pt.fromPixels is not a function" on the first estimatePose().
+   *
+   * Patching the shared instance (not the class) fixes both callers: the
+   * returned tensor belongs to the same engine, so it flows through the
+   * model unchanged.
+   */
+  window.__tmEngineShim = function (reason) {
+    try {
+      var engine = (window.tf && typeof tf.engine === "function") ? tf.engine() : null;
+      if (!engine && window._tfengine) engine = window._tfengine;
+      if (!engine) return false;
+      if (typeof engine.fromPixels !== "function") {
+        engine.fromPixels = function (pixels, numChannels) {
+          return tf.browser.fromPixels(pixels, numChannels);
+        };
+      }
+      if (typeof engine.toPixels !== "function" && tf.browser && tf.browser.toPixels) {
+        engine.toPixels = function (tensor, canvas) {
+          return tf.browser.toPixels(tensor, canvas);
+        };
+      }
+      console.info("[tfjs shim] Engine.fromPixels patched (" + reason + ")");
+      return true;
+    } catch (e) {
+      console.warn("[tfjs shim] failed", e);
+      return false;
+    }
+  };
+  window.__tmShimOk = window.__tmEngineShim("pre-load");
+</script>
 <script src="/static/js/teachablemachine-pose.min.js"></script>
 <script>
 (function(){
@@ -78,6 +115,7 @@
   let lastInfer = 0;
   let lastSent = 0;
   let lastStatus = "";
+  let shimRetried = false;
 
   function setStatus(text, color) {
     if (text === lastStatus) return;
@@ -94,7 +132,10 @@
     try {
       setStatus("加载模型 /static/pose_model …");
       model = await tmPose.load("/static/pose_model/model.json", "/static/pose_model/metadata.json");
-      setStatus("模型已加载，等待摄像头画面…", "var(--jade)");
+      setStatus(
+        window.__tmShimOk ? "模型已加载（引擎补丁已应用），等待画面…" : "模型已加载，等待画面…",
+        "var(--jade)"
+      );
       setLive(true);
       requestAnimationFrame(loop);
     } catch (err) {
@@ -150,7 +191,17 @@
       }
     } catch (err) {
       console.error(err);
-      setStatus("推理失败：" + (err && err.message ? err.message : err), "var(--coral)");
+      const msg = String((err && err.message) || err);
+      // Recover from the tfjs engine/API mismatch without a page reload.
+      if (!shimRetried && msg.indexOf("fromPixels") >= 0 && window.__tmEngineShim) {
+        shimRetried = true;
+        if (window.__tmEngineShim("retry")) {
+          // The rAF loop calls infer() again in ~0.5 s with the patched engine.
+          setStatus("已注入引擎兼容补丁，重试推理…", "var(--amber)");
+          return;
+        }
+      }
+      setStatus("推理失败：" + msg, "var(--coral)");
     } finally {
       inferring = false;
     }
