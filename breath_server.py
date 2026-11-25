@@ -44,13 +44,14 @@ except Exception as exc:
 
 
 alarm_event = threading.Event()
-alarm_stats = {"bursts": 0}
+alarm_stats = {"bursts": 0, "ticks": 0, "beeps": 0}
 
 
 def alarm_worker():
     print("alarm worker started", flush=True)
     """Three short beeps with a pause between bursts, LED in sync."""
     while True:
+        alarm_stats["ticks"] += 1
         if not alarm_event.is_set():
             if GPIO_OK:
                 GPIO.output(17, 0)
@@ -62,6 +63,7 @@ def alarm_worker():
                 break
             GPIO.output(17, 1)
             GPIO.output(27, 1)
+            alarm_stats["beeps"] += 1
             time.sleep(0.15)
             GPIO.output(17, 0)
             GPIO.output(27, 0)
@@ -265,7 +267,12 @@ def chart_js():
 
 @app.route("/api/alarm_state")
 def alarm_state():
-    return jsonify({"alarm": alarm_event.is_set(), "bursts": alarm_stats["bursts"]})
+    return jsonify({
+        "alarm": alarm_event.is_set(),
+        "bursts": alarm_stats["bursts"],
+        "ticks": alarm_stats["ticks"],
+        "beeps": alarm_stats["beeps"],
+    })
 
 
 @app.route("/api/test_alarm")
