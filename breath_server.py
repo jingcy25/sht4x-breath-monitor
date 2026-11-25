@@ -190,6 +190,13 @@ camera_state = {"posture": None, "confidence": None, "ts": 0.0}
 
 camera_jpeg = b""
 camera_jpeg_lock = threading.Lock()
+camera_frame_ts = 0.0
+camera_frame_bytes = 0
+
+# Sensor handles published by the acquisition loop so /api/selftest can probe
+# the same objects without opening a second bus handle.
+dev_lock = threading.Lock()
+devices = {"breath": None, "light": None, "adc": None}
 
 
 def camera_loop():
@@ -204,7 +211,7 @@ def camera_loop():
     except Exception as exc:
         print("camera: OpenCV unavailable: %s" % exc, flush=True)
         return
-    global camera_jpeg
+    global camera_jpeg, camera_frame_ts, camera_frame_bytes
     while True:
         cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
         if not cap.isOpened():
@@ -225,8 +232,11 @@ def camera_loop():
                     break
                 ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                 if ok:
+                    data = jpg.tobytes()
                     with camera_jpeg_lock:
-                        camera_jpeg = jpg.tobytes()
+                        camera_jpeg = data
+                    camera_frame_ts = time.time()
+                    camera_frame_bytes = len(data)
                 time.sleep(0.03)
         except Exception as exc:
             print("camera loop error: %s" % exc, flush=True)
@@ -519,6 +529,11 @@ def sensor_loop():
                     if adc is not None:
                         print("ADS1115 connected at 0x48 (i2c-1)", flush=True)
 
+            with dev_lock:
+                devices["breath"] = breath_sensor
+                devices["light"] = light_sensor
+                devices["adc"] = adc
+
             posture, posture_conf = _camera_posture(t, lux)
 
             signal = 0.0
@@ -803,6 +818,75 @@ def api_events():
     rows = [{"x": s, "alarm_ts": a, "dur": round(d, 1)} for s, a, d in cur.fetchall()]
     conn.close()
     return jsonify(rows)
+
+
+@app.route("/api/selftest")
+def api_selftest():
+    """One-shot hardware health check (used during wiring/demo setup)."""
+    out = {"ts": time.time()}
+
+    with dev_lock:
+        b, l, a = devices["breath"], devices["light"], devices["adc"]
+
+    sht = {"addr": "0x44/i2c-1", "present": b is not None}
+    if b is not None:
+        try:
+            temp, rh = b.read()
+            sht.update({"ok": True, "temp_c": round(temp, 2), "rh_pct": round(rh, 2)})
+        except Exception as exc:
+            sht.update({"ok": False, "error": str(exc)})
+    out["sht4x"] = sht
+
+    veml = {"addr": "0x10/i2c-1", "present": l is not None}
+    if l is not None:
+        try:
+            raw, lux = l.read()
+            veml.update({"ok": True, "raw": raw, "lux": round(lux, 2)})
+        except Exception as exc:
+            veml.update({"ok": False, "error": str(exc)})
+    out["veml7700"] = veml
+
+    adc_info = {"addr": "0x48/i2c-1", "present": a is not None}
+    if a is not None:
+        chans = {}
+        for ch in range(4):
+            samples = []
+            for _ in range(6):
+                try:
+                    volt, _raw = a.read_voltage(ch)
+                    samples.append(volt)
+                except Exception as exc:
+                    adc_info["error"] = str(exc)
+                    break
+                time.sleep(0.1)
+            if samples:
+                lo, hi = min(samples), max(samples)
+                chans["AIN%d" % ch] = {
+                    "min_v": round(lo, 3),
+                    "max_v": round(hi, 3),
+                    "mean_v": round(sum(samples) / len(samples), 3),
+                    "swing_v": round(hi - lo, 3),
+                }
+        if chans:
+            main = chans["AIN0"]
+            adc_info.update({"ok": True, "channels": chans})
+            adc_info.update({k: main[k] for k in ("min_v", "max_v", "mean_v", "swing_v")})
+            # A floating input wanders hundreds of mV with no load on the bed.
+            adc_info["verdict"] = "floating" if main["swing_v"] > 0.20 else "stable"
+    out["ads1115"] = adc_info
+
+    age = time.time() - camera_frame_ts if camera_frame_ts else None
+    out["camera"] = {
+        "ok": age is not None and age < 3.0,
+        "frame_age_s": None if age is None else round(age, 1),
+        "jpeg_bytes": camera_frame_bytes,
+        "posture": camera_state.get("posture"),
+        "posture_ts": camera_state.get("ts"),
+    }
+
+    out["config"] = {k: config[k] for k in ("fsr_in_bed", "fsr_invert", "th_up",
+                                            "apnea_sec", "lux_dark", "sleep_onset_s")}
+    return jsonify(out)
 
 
 @app.route("/api/config", methods=["POST"])
