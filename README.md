@@ -18,24 +18,13 @@
 | 器件 | 接线 | 说明 |
 |---|---|---|
 | 口鼻 SHT4x | I2C1 0x44（Pin 1/3/5/9） | 主呼吸通道 |
-| 环境 SHT4x | **I2C3** 0x44（软件 I2C，GPIO23/24） | 与口鼻同地址，必须另一条总线 |
 | VEML7700 | I2C1 0x10 | 开/关灯、相机门控 |
 | ADS1115 | I2C1 0x48（ADDR→GND） | FSR 单端 AIN0，PGA ±2.048 V |
 | MAX30102 | I2C1 0x57 | SpO₂/HR，1 Hz 记录 |
 | 蜂鸣器 | GPIO17（Pin 11） | NPN + 1 kΩ + 续流 |
 | LED | GPIO27（Pin 13） | 330 Ω，按同学接线 |
 
-软件 I2C3（环境 SHT4x）：
-
-```bash
-# /boot/firmware/config.txt
-dtoverlay=i2c-gpio,bus=3,i2c_gpio_sda=23,i2c_gpio_scl=24
-```
-
-```bash
-i2cdetect -y 1   # 0x10, 0x44, 0x48, 0x57
-i2cdetect -y 3   # 0x44
-```
+> 环境 SHT4x 已删除；不再使用 i2c-3 overlay。所有 I2C 设备在 I2C1。
 
 FSR 分压：3V3 — FSR — 节点 — 5 kΩ — GND（或反过来）。**先实测**空床/手压/身体压三档电压：
 
@@ -65,7 +54,6 @@ python3 -m pip install --break-system-packages -r spo2/requirements.txt
 
 # 启动（演示可把 sleep-onset 降到 60 s，正式用 300 s）
 python3 -u breath_server.py --port 8000 --sleep-onset 300
-# 若环境 SHT4x 已接在 i2c-3，并已启用 overlay，再加 --env-i2c3
 ```
 
 systemd（可选，推荐）：
@@ -91,7 +79,7 @@ PoseNet 主干用本地 `static/posenet/mobilenet/float/075/`（MobileNetV1 0.75
 `static/js/teachablemachine-pose.min.js` 已把默认 Google 地址改为 `/static/posenet/mobilenet/float/075/`，离线可用。
 
 - 推理在浏览器端（`tf.min.js` + TM pose），Pi 只负责 MJPEG；不存帧。
-- 页面关闭 → `/api/camera` 不再更新 → 5 s 后 A 层视为 `unknown`。
+- 摄像头后台线程固定 **320×240@5 MJPG**（降低 USB 供电/带宽压力）；页面关闭 → `/api/camera` 不再更新 → 5 s 后 A 层视为 `unknown`。
 - 若换模型，替换 `static/pose_model/` 三个文件即可；标签顺序会在页面显示。
 
 ## SpO₂（记录，不报警）

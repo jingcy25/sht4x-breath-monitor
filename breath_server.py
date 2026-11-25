@@ -167,7 +167,6 @@ config = {
     "sleep_onset_s": 300.0,             # 5 min; demo can lower
     "lux_dark": 10.0,
     "warn_sec": 10.0,
-    "env_i2c3": False,                  # enable only when the i2c-3 SHT4x is wired
 }
 cfg_lock = threading.Lock()
 
@@ -189,7 +188,54 @@ clients_lock = threading.Lock()
 camera_lock = threading.Lock()
 camera_state = {"posture": None, "confidence": None, "ts": 0.0}
 
-video_lock = threading.Lock()
+camera_jpeg = b""
+camera_jpeg_lock = threading.Lock()
+
+
+def camera_loop():
+    """Single camera reader; MJPEG clients consume the latest JPEG.
+
+    Opening ``cv2.VideoCapture`` inside a Flask streaming generator can block
+    the first response on some UVC cameras. A background reader is more robust
+    and supports multiple viewers.
+    """
+    try:
+        import cv2
+    except Exception as exc:
+        print("camera: OpenCV unavailable: %s" % exc, flush=True)
+        return
+    global camera_jpeg
+    while True:
+        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            print("camera: /dev/video0 open failed; retrying", flush=True)
+            time.sleep(3.0)
+            continue
+        try:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+            cap.set(cv2.CAP_PROP_FPS, 5)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            print("camera: /dev/video0 opened", flush=True)
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    print("camera: read failed; reopening", flush=True)
+                    break
+                ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                if ok:
+                    with camera_jpeg_lock:
+                        camera_jpeg = jpg.tobytes()
+                time.sleep(0.03)
+        except Exception as exc:
+            print("camera loop error: %s" % exc, flush=True)
+        finally:
+            try:
+                cap.release()
+            except Exception:
+                pass
+        time.sleep(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -314,17 +360,6 @@ def sensor_loop():
         breath_sensor = None
         print("SHT4x breath sensor not found at 0x44 (i2c-1)", flush=True)
 
-    if config.get("env_i2c3") and _i2c_present(3, 0x44):
-        try:
-            env_sensor = breath_sensors.SHT4x(3)
-            print("environment SHT4x: i2c-3", flush=True)
-        except Exception as exc:
-            env_sensor = None
-            print("environment SHT4x unavailable (i2c-3): %s" % exc, flush=True)
-    else:
-        env_sensor = None
-        print("environment SHT4x disabled (pass --env-i2c3 when wired)", flush=True)
-
     if _i2c_present(1, 0x10):
         try:
             light_sensor = breath_sensors.VEML7700(1)
@@ -430,13 +465,8 @@ def sensor_loop():
                     spo2_worker.stop()
                 print("bed state: %s" % ("in_bed" if in_bed else "standby"), flush=True)
 
-            # slow sensors
+            # slow sensors (VEML only; environment SHT4x removed)
             if (t - last_slow) > 2.0:
-                if env_sensor is not None:
-                    try:
-                        env_temp, env_hum = env_sensor.read()
-                    except Exception:
-                        env_temp = env_hum = None
                 if light_sensor is not None:
                     try:
                         _, lux = light_sensor.read()
@@ -618,38 +648,27 @@ def chart_js():
 @app.route("/video_feed")
 def video_feed():
     def gen():
-        try:
-            import cv2
-        except Exception as exc:
-            yield b""
-            print("OpenCV unavailable: %s" % exc, flush=True)
-            return
-        if not video_lock.acquire(blocking=False):
-            yield b""
-            return
-        cap = None
-        try:
-            cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            cap.set(cv2.CAP_PROP_FPS, 15)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            while True:
-                ok, frame = cap.read()
-                if not ok:
-                    time.sleep(0.2)
-                    continue
-                ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-                if not ok:
-                    continue
-                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" +
-                       jpg.tobytes() + b"\r\n")
-        finally:
-            if cap is not None:
-                cap.release()
-            video_lock.release()
+        last = None
+        while True:
+            with camera_jpeg_lock:
+                jpg = camera_jpeg
+            if jpg and jpg is not last:
+                last = jpg
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " +
+                       str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
+            else:
+                time.sleep(0.05)
 
     return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/snapshot")
+def snapshot():
+    with camera_jpeg_lock:
+        jpg = camera_jpeg
+    if not jpg:
+        return Response("camera not ready", status=503, mimetype="text/plain")
+    return Response(jpg, mimetype="image/jpeg")
 
 
 @app.route("/api/camera", methods=["POST"])
@@ -794,7 +813,6 @@ def main():
     ap.add_argument("--fsr", type=float, default=0.100)
     ap.add_argument("--fsr-invert", action="store_true")
     ap.add_argument("--sleep-onset", type=float, default=300.0)
-    ap.add_argument("--env-i2c3", action="store_true")
     args = ap.parse_args()
 
     DB = args.db
@@ -803,7 +821,6 @@ def main():
     config["fsr_in_bed"] = args.fsr
     config["fsr_invert"] = bool(args.fsr_invert)
     config["sleep_onset_s"] = args.sleep_onset
-    config["env_i2c3"] = bool(args.env_i2c3)
 
     init_db()
 
@@ -816,6 +833,7 @@ def main():
     )
 
     threading.Thread(target=sensor_loop, daemon=True).start()
+    threading.Thread(target=camera_loop, daemon=True).start()
     print("呼吸监测后端已启动: http://0.0.0.0:%d" % args.port, flush=True)
     print("FSR preset=%.3f V (invert=%s); camera=/camera; SpO2=1 Hz log-only"
           % (config["fsr_in_bed"], config["fsr_invert"]), flush=True)
