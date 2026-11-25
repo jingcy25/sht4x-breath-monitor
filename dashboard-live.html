@@ -194,6 +194,16 @@ window.addEventListener('error', function(e){
       </div>
 
       <div class="card" style="margin-top:16px">
+        <h2>环境与床位 <span style="color:var(--faint);text-transform:none;font-weight:400">第二路 SHT4x · VEML7700 · FSR</span></h2>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+          <div><span style="color:var(--faint);font-size:11px">环境温度</span><div><b id="envTemp" style="font-size:22px">--</b><span style="color:var(--faint)"> °C</span></div></div>
+          <div><span style="color:var(--faint);font-size:11px">环境湿度</span><div><b id="envHum" style="font-size:22px">--</b><span style="color:var(--faint)"> %</span></div></div>
+          <div><span style="color:var(--faint);font-size:11px">光照</span><div><b id="lux" style="font-size:22px">--</b><span style="color:var(--faint)"> lx</span></div></div>
+          <div><span style="color:var(--faint);font-size:11px">床压</span><div><b id="fsr" style="font-size:22px">--</b><span style="color:var(--faint)"> V</span></div></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
         <h2>实时呼吸信号 <span style="color:var(--faint);text-transform:none;font-weight:400">最近 30 秒 · 去基线</span></h2>
         <div class="chart-box"><canvas id="liveChart"></canvas></div>
       </div>
@@ -506,6 +516,14 @@ window.addEventListener('error', function(e){
         const apnea = m.apnea === 1;
         const warn = !apnea && since > cfg.warnSec;
         updateUI(m.signal, m.humidity, (m.temp != null ? m.temp : 26), since, apnea, warn);
+        const put = (id, v, d) => {
+          const el = $(id);
+          if(el) el.textContent = (v === null || v === undefined || isNaN(v)) ? "--" : Number(v).toFixed(d);
+        };
+        put("envTemp", m.env_temp, 1);
+        put("envHum", m.env_hum, 1);
+        put("lux", m.lux, 1);
+        put("fsr", m.fsr, 3);
         updateLiveChart();
       }catch(e){}
     };

@@ -23,9 +23,7 @@ import threading
 import time
 from collections import deque
 
-import board
-import busio
-import adafruit_sht4x
+import breath_sensors
 from flask import Flask, jsonify, request, Response, send_from_directory
 from flask_sock import Sock
 
@@ -62,7 +60,8 @@ DB = "breath.db"
 config = {"apnea_sec": 20.0, "th_up": 1.2}
 cfg_lock = threading.Lock()
 latest = {"t": 0, "humidity": 0.0, "signal": 0.0, "breath": 0,
-          "apnea": 0, "bpm": 0.0, "temp": 0.0}
+          "apnea": 0, "bpm": 0.0, "temp": 0.0,
+          "env_temp": None, "env_hum": None, "lux": None, "fsr": None}
 latest_lock = threading.Lock()
 clients = []
 clients_lock = threading.Lock()
@@ -83,9 +82,30 @@ def init_db():
 
 
 def sensor_loop():
-    i2c = busio.I2C(board.SCL, board.SDA)
-    s = adafruit_sht4x.SHT4x(i2c)
-    s.mode = adafruit_sht4x.Mode.NOHEAT_HIGHPRECISION
+    breath_sensor = breath_sensors.SHT4x(1)
+    try:
+        env_sensor = breath_sensors.SHT4x(3)
+        print("environment SHT4x: i2c-3", flush=True)
+    except Exception as exc:
+        env_sensor = None
+        print("environment SHT4x unavailable (i2c-3): %s" % exc, flush=True)
+    try:
+        light_sensor = breath_sensors.VEML7700(1)
+    except Exception as exc:
+        light_sensor = None
+        print("VEML7700 unavailable: %s" % exc, flush=True)
+    try:
+        adc = breath_sensors.ADS1115(1)
+    except Exception as exc:
+        adc = None
+        print("ADS1115 unavailable: %s" % exc, flush=True)
+
+    env_temp = env_hum = None
+    lux = None
+    fsr = None
+    last_slow = 0.0
+    last_fsr = 0.0
+
     det = BreathDetector()
     last_breath = time.time()
     breath_times = deque(maxlen=240)
@@ -96,8 +116,7 @@ def sensor_loop():
     while True:
         try:
             t = time.time()
-            h = s.relative_humidity
-            temp = s.temperature
+            temp, h = breath_sensor.read()
             signal, breath = det.update(t, h)
             if breath:
                 last_breath = t
@@ -122,9 +141,33 @@ def sensor_loop():
 
             bpm = sum(1 for x in breath_times if t - x <= 60)
 
+            if t - last_slow > 2.0:
+                if env_sensor is not None:
+                    try:
+                        env_temp, env_hum = env_sensor.read()
+                    except Exception:
+                        env_temp = env_hum = None
+                if light_sensor is not None:
+                    try:
+                        _, lux = light_sensor.read()
+                    except Exception:
+                        lux = None
+                last_slow = t
+
+            if adc is not None and t - last_fsr > 1.0:
+                try:
+                    fsr, _ = adc.read_voltage(0)
+                except Exception:
+                    fsr = None
+                last_fsr = t
+
             msg = {"t": t, "humidity": round(h, 2), "signal": round(signal, 3),
                    "breath": 1 if breath else 0, "apnea": 1 if apnea else 0,
-                   "bpm": round(bpm, 1), "temp": round(temp, 1)}
+                   "bpm": round(bpm, 1), "temp": round(temp, 1),
+                   "env_temp": None if env_temp is None else round(env_temp, 1),
+                   "env_hum": None if env_hum is None else round(env_hum, 1),
+                   "lux": None if lux is None else round(lux, 1),
+                   "fsr": None if fsr is None else round(fsr, 3)}
 
             with latest_lock:
                 latest.update(msg)
