@@ -429,7 +429,7 @@ def sensor_loop():
                     a_state = "awake"
                     sleep_since = None
                 elif sleep_context:
-                    if regular and fsr_motion < 0.02:
+                    if regular and fsr_motion < 0.05:
                         if sleep_since is None:
                             sleep_since = t
                         if (t - sleep_since) >= sleep_onset_s:
@@ -445,7 +445,7 @@ def sensor_loop():
                     sleep_since = None
                     a_state = "awake"
 
-                if fsr_motion > 0.03 and a_state == "asleep":
+                if fsr_motion > 0.08 and a_state == "asleep":
                     a_state = "awake"
 
                 apnea = a_state == "asleep" and (t - last_breath) > apnea_sec
