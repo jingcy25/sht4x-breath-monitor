@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 from collections import deque
+from datetime import datetime, timedelta, timezone
 
 import breath_sensors
 from flask import Flask, jsonify, request, Response, send_from_directory
@@ -1216,8 +1217,15 @@ def api_report():
         h, m = divmod(m, 60)
         return "%d h %02d min" % (h, m)
 
+    # The Pi runs in UTC; the report must read in the user's wall clock.
+    tz = timezone(timedelta(hours=8))
+    tz_label = "UTC+8"
+
     def clock(ts):
-        return time.strftime("%m-%d %H:%M:%S", time.localtime(ts))
+        return datetime.fromtimestamp(ts, tz).strftime("%m-%d %H:%M:%S")
+
+    def hhmm(ts):
+        return datetime.fromtimestamp(ts, tz).strftime("%H:%M")
 
     kpi = [
         ("在床时长", hm(in_bed_s)),
@@ -1236,12 +1244,77 @@ def api_report():
         for k, v in kpi
     )
 
-    state_rows = "".join(
-        "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
-        % ({"awake": "清醒", "asleep": "已入睡", "gap": "离床（间隙）",
-            "standby": "待机"}.get(st, st), clock(a), clock(b), hm(b - a))
-        for a, b, st in segs[-40:]
-    ) or '<tr><td colspan="4" class="muted">该时段没有状态记录</td></tr>'
+    # --- A-state timeline as an inline SVG (prints without JS) --------------
+    COLORS = {"asleep": "#1f9d63", "awake": "#d69e2e",
+              "gap": "#9aa7b8", "standby": "#dde5ee"}
+    NAMES = {"awake": "清醒", "asleep": "已入睡",
+             "gap": "离床（间隙）", "standby": "待机"}
+    W, PAD, TOP, LANE = 900.0, 6.0, 16.0, 46.0
+    span = max(1.0, now - since)
+
+    def xpix(ts):
+        return PAD + (ts - since) / span * (W - 2 * PAD)
+
+    pieces = ['<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="#f5f8fb" '
+              'rx="3"/>' % (PAD, TOP, W - 2 * PAD, LANE)]
+    for a, b, st in segs:
+        x0 = xpix(a)
+        w = max(0.9, xpix(b) - x0)
+        pieces.append(
+            '<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s" '
+            'rx="1.5"><title>%s %s – %s（%s）</title></rect>'
+            % (x0, TOP, w, LANE, COLORS.get(st, "#cbd5e1"), NAMES.get(st, st),
+               clock(a), clock(b), hm(b - a)))
+
+    step = 3600.0 if hours <= 14 else (7200.0 if hours <= 30 else 4 * 3600.0)
+    grid = []
+    t = math.ceil(since / step) * step
+    while t <= now:
+        xg = xpix(t)
+        grid.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" '
+                    'stroke="#e8eef5" stroke-width="1"/>'
+                    % (xg, TOP, xg, TOP + LANE))
+        grid.append('<text x="%.1f" y="%.1f" font-size="9.5" fill="#8a97a6" '
+                    'text-anchor="middle">%s</text>'
+                    % (xg, TOP + LANE + 13, hhmm(t)))
+        t += step
+
+    legend = "".join(
+        '<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px">'
+        '<i style="width:10px;height:10px;border-radius:2px;background:%s;display:inline-block"></i>%s</span>'
+        % (COLORS[k], NAMES[k])
+        for k in ("asleep", "awake", "gap", "standby"))
+
+    axis = ('<text x="%.1f" y="%.1f" font-size="9.5" fill="#8a97a6" '
+            'text-anchor="start">%s</text>'
+            '<text x="%.1f" y="%.1f" font-size="9.5" fill="#8a97a6" '
+            'text-anchor="end">%s</text>'
+            % (PAD, TOP + LANE + 27, clock(since),
+               W - PAD, TOP + LANE + 27, clock(now)))
+    timeline_svg = (
+        '<svg viewBox="0 0 %.0f %.0f" width="100%%" height="96" '
+        'preserveAspectRatio="none" role="img" aria-label="A 状态时间线">%s%s%s%s</svg>'
+        % (W, TOP + LANE + 34, "".join(grid), "".join(pieces), axis, ""))
+
+    counts = {}
+    for a, b, st in segs:
+        n, d = counts.get(st, (0, 0.0))
+        counts[st] = (n + 1, d + (b - a))
+    rows_summary = []
+    for st in ("asleep", "awake", "gap", "standby"):
+        if st in counts:
+            rows_summary.append(
+                "<tr><td>%s</td><td>%d</td><td>%s</td><td>%.1f%%</td></tr>"
+                % (NAMES[st], counts[st][0], hm(counts[st][1]),
+                   100.0 * counts[st][1] / span))
+    recorded = sum(d for _n, d in counts.values())
+    if recorded < span * 0.98:
+        rows_summary.append(
+            '<tr><td class="muted">未记录（服务未运行/无数据）</td><td>—</td>'
+            '<td class="muted">%s</td><td class="muted">%.1f%%</td></tr>'
+            % (hm(span - recorded), 100.0 * (span - recorded) / span))
+    state_summary = "".join(rows_summary) or \
+        '<tr><td colspan="4" class="muted">该时段没有状态记录</td></tr>'
 
     max_rate = 0.0
     hourly_rows = []
@@ -1257,7 +1330,7 @@ def api_report():
         hour_html += (
             '<tr><td>%s</td><td>%d</td><td>%.1f</td>'
             '<td class="bar"><i style="width:%d%%"></i></td></tr>'
-            % (time.strftime("%m-%d %H:00", time.localtime(h * 3600)), b, rate, width)
+            % (datetime.fromtimestamp(h * 3600, tz).strftime("%m-%d %H:00"), b, rate, width)
         )
     hour_html = hour_html or '<tr><td colspan="4" class="muted">无样本</td></tr>'
 
@@ -1296,6 +1369,9 @@ def api_report():
   th{color:var(--muted);font-weight:600;font-size:12px}
   td.bar{width:34%%}
   td.bar i{display:block;height:9px;background:var(--jade);border-radius:3px;min-width:1px}
+  .timeline{border:1px solid var(--line);border-radius:10px;padding:8px 6px 2px;background:#fff}
+  .timeline svg{display:block;width:100%%;height:auto}
+  .legend{font-size:11px;color:var(--muted);margin:8px 0 14px}
   .muted{color:var(--muted)}
   .note{font-size:12px;color:var(--muted);line-height:1.8;margin-top:12px}
   .toolbar{margin-top:26px;display:flex;gap:10px}
@@ -1304,14 +1380,18 @@ def api_report():
   @media print{body{background:#fff;padding:0}.sheet{border:0;border-radius:0}.toolbar{display:none}}
 </style></head><body><div class="sheet">
   <h1>睡眠呼吸监测报告</h1>
-  <div class="sub">统计区间：%(start)s — %(end)s（最近 %(hours).0f 小时）<br>
-    设备：raspberrypi-09 · 生成于 %(now)s · 采样约 %(hz).0f Hz</div>
+  <div class="sub">统计区间：<b>%(start)s — %(end)s</b>（生成时刻 %(now)s，向前 %(hours).0f 小时，时区 %(tz)s）<br>
+    设备：raspberrypi-09 · 采样约 %(hz).0f Hz · 床头灯状态见状态时间线</div>
 
   <div class="kpis">%(kpi)s</div>
 
   <h2>A 状态时间线</h2>
-  <table><thead><tr><th>状态</th><th>开始</th><th>结束</th><th>时长</th></tr></thead>
-  <tbody>%(states)s</tbody></table>
+  <div class="timeline">%(timeline)s</div>
+  <div class="legend">%(legend)s</div>
+  <table>
+    <thead><tr><th>状态</th><th>段数</th><th>累计时长</th><th>占区间</th></tr></thead>
+    <tbody>%(state_summary)s</tbody>
+  </table>
 
   <h2>呼吸暂停事件</h2>
   <table><thead><tr><th>#</th><th>暂停开始</th><th>触发报警</th><th>总暂停时长</th></tr></thead>
@@ -1336,21 +1416,25 @@ def api_report():
     <button onclick="location.href='/api/report.csv?hours=%(hours).0f'">导出 CSV</button>
   </div>
 </div></body></html>""" % {
-        "range": time.strftime("%m-%d %H:%M", time.localtime(since)),
+        "range": clock(since),
         "start": clock(since),
         "end": clock(now),
         "now": clock(now),
+        "tz": tz_label,
         "hours": hours,
         "hz": sample_hz,
         "kpi": kpi_html,
-        "states": state_rows,
+        "timeline": timeline_svg,
+        "legend": legend,
+        "state_summary": state_summary,
         "events": ev_html,
         "hours_rows": hour_html,
         "spo2": spo2_html,
         "apnea": config["apnea_sec"],
         "onset": config["sleep_onset_s"],
     }
-    return Response(html, mimetype="text/html")
+    return Response(html, mimetype="text/html",
+                    headers={"Cache-Control": "no-store, max-age=0"})
 
 
 @app.route("/api/report.csv")
@@ -1369,10 +1453,11 @@ def api_report_csv():
     conn.close()
 
     def gen():
-        yield "ts,iso_time,humidity,signal,breath,apnea\n"
+        tz = timezone(timedelta(hours=8))
+        yield "ts,iso_time_utc8,humidity,signal,breath,apnea\n"
         for ts, hum, sig, br, ap in rows:
             yield "%s,%s,%s,%s,%s,%s\n" % (
-                ts, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)),
+                ts, datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M:%S"),
                 hum, sig, br, ap)
     return Response(gen(), mimetype="text/csv",
                     headers={"Content-Disposition": "attachment; filename=sleep_report.csv"})
