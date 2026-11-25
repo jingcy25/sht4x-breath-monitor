@@ -114,7 +114,9 @@ PoseNet 主干用本地 `static/posenet/mobilenet/float/075/`（MobileNetV1 0.75
 | `GET /api/history?range=1h|24h` | 呼吸频率 + 事件 |
 | `GET /api/events` | 事件（总暂停时长） |
 | `POST /api/config` | `th_up/apnea_sec/fsr_in_bed/fsr_invert` |
-| `GET /api/selftest` | 一键硬件自检（各传感器读数 + ADC 四通道摆动） |
+| `GET /api/selftest` | 一键硬件自检（各传感器读数 + ADC 四通道摆动 + SpO2 模块状态） |
+| `GET /api/report?hours=12` | **一键睡眠报告**（可打印/存 PDF 的 HTML） |
+| `GET /api/report.csv?hours=12` | 同一时间窗的原始样本 CSV |
 | `GET /api/export.csv` | 原始样本 |
 | `GET /api/alarm_state` / `GET /api/test_alarm` | 报警状态/自检 |
 | `WS /ws` | 50 ms 推送 |
@@ -143,6 +145,9 @@ I²C 探测用 **SMBus quick write**（等价 `i2cdetect`）。注意不能用 `
 - LED 用 GPIO27，与同学接线一致。
 - **WebSocket 不再阻塞采集**：以前在采集线程里直接 `client.send()`，浏览器标签被后台节流/半开连接时发送缓冲填满，`send` 永久阻塞，整个采样循环（连同报警判定）一起冻住。现在采样线程只把消息丢进 `queue.Queue(maxsize=1)`，由独立 `ws_publisher` 线程发送，并用 `select` 检查可写性，不读的客户端直接踢掉；另加 `loop_watchdog`，循环停摆 >15 s 会打 `WARNING: sensor loop stale`。
 - **仪表盘自动重连**：断线 4 s 后角标显示 `断线 N s` 并每 2 s 重连，不再表现为“页面卡死”。
+- **姿态平滑（`PostureFilter`）**：TM Pose 在模糊画面上会以 0.9 置信度在 lying/sitting 之间来回跳，而单帧 `sitting` 就会把会话踢回 AWAKE 并清零入睡计时（实测 17:24 那分钟 lying 17 帧、sitting 38 帧）。现在新姿态必须持续 **lying 2 s / sitting 3 s** 才替换当前姿态，断流 8 s 后姿态失效；A 层仍然只看到“一个姿态”，只是稳定版。
+- **SpO2 可见性**：`/api/status` 新增 `spo2_state`（idle/running/exited/absent）；`/api/selftest` 增加 `spo2` 段，直接探测 `0x57` 并给出“未接/在位”结论，仪表盘 SpO2 瓦片下方显示状态。
+- **一键睡眠报告**：`/api/report` 生成可直接打印或存 PDF 的单页 HTML（KPI、A 状态时间线、暂停事件、每小时呼吸率、血氧小结、口径与局限说明），`/api/report.csv` 导出同一时间窗原始样本。
 - **沉默也是入睡信号**：进入 `asleep` 原本要求“30 s 内 ≥3 次呼吸”，于是在入睡前就停呼吸的人永远进不了 `asleep`、永远不报警。现在“无呼吸时长 > `apnea_sec`”同样算满足入睡条件（`silence_counts_as_sleep`，可用 `POST /api/config {"silence_counts_as_sleep": false}` 关闭，恢复严格模式）。
 
 ## 已知限制

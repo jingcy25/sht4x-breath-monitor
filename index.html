@@ -210,6 +210,7 @@ window.addEventListener('error', function(e){
     <div class="top-right">
       <span class="clock" id="clock">--:--:--</span>
       <a class="src-badge" href="/camera" title="打开摄像头躺/坐识别" style="text-decoration:none">📷 摄像头</a>
+      <a class="src-badge" href="/api/report?hours=12" target="_blank" rel="noopener" title="生成/打印睡眠报告" style="text-decoration:none">📄 睡眠报告</a>
       <span class="src-badge" id="srcBadge"><span class="dot"></span><span id="srcText">演示模式</span></span>
       <button class="icon-btn" id="settingsBtn" title="参数设置" aria-label="参数设置">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -253,7 +254,6 @@ window.addEventListener('error', function(e){
           <div class="cell"><div class="k">口鼻温度</div><div class="v"><span id="envTemp">--</span><span class="u">°C</span></div></div>
           <div class="cell"><div class="k">口鼻湿度</div><div class="v"><span id="envHum">--</span><span class="u">%</span></div></div>
           <div class="cell"><div class="k">环境光照</div><div class="v"><span id="lux">--</span><span class="u">lx</span></div></div>
-          <div class="cell"><div class="k">相机原始</div><div class="v" id="camRaw">--</div></div>
         </div>
       </div>
 
@@ -274,8 +274,8 @@ window.addEventListener('error', function(e){
           <div class="tile breath"><div class="k">暂停事件</div><div class="v ok" id="countVal">0<span class="u">次</span></div></div>
           <div class="tile"><div class="k">报警阈值</div><div class="v" id="thVal">20<span class="u">s</span></div></div>
           <div class="tile"><div class="k">A 状态</div><div class="v" id="aState">--</div></div>
-          <div class="tile"><div class="k">相机姿势</div><div class="v" id="cameraPosture">--</div></div>
-          <div class="tile"><div class="k">SpO₂</div><div class="v"><span id="spo2Val">--</span><span class="u">%</span></div></div>
+          <div class="tile"><div class="k">相机姿势</div><div class="v" id="cameraPosture">--</div><div style="font-size:10px;color:var(--faint);margin-top:2px" id="camRaw">--</div></div>
+          <div class="tile"><div class="k">SpO₂</div><div class="v"><span id="spo2Val">--</span><span class="u">%</span></div><div style="font-size:10px;color:var(--faint);margin-top:2px" id="spo2State">—</div></div>
           <div class="tile"><div class="k">心率</div><div class="v"><span id="hrVal">--</span><span class="u">bpm</span></div></div>
         </div>
       </div>
@@ -522,10 +522,14 @@ window.addEventListener('error', function(e){
       st.className = "bed-state" + (standby ? "" : " on");
     }
   }
-  function setStandby(on){
+  function setStandby(on, aState){
     document.body.classList.toggle("standby", on);
     if(on){
-      setState("standby", "离床 · 待机", "FSR 触发线 " + cfg.fsr.toFixed(2) + " V；极性 " + (cfg.fsrInvert ? "反相" : "正相"));
+      const gap = aState === "gap";
+      setState("standby",
+        gap ? "离床 · 等待回床" : "离床 · 待机",
+        gap ? "FSR 已卸载；15 分钟内回来算同一晚，超时结束本次会话"
+            : "FSR 触发线 " + cfg.fsr.toFixed(2) + " V；极性 " + (cfg.fsrInvert ? "反相" : "正相"));
       $("bpmBig").textContent = "—";
       $("sinceVal").innerHTML = "—";
       $("apneaVal").innerHTML = "—";
@@ -616,7 +620,7 @@ window.addEventListener('error', function(e){
         }
         S.standbyPrev = standby;
         S.t = m.t;
-        setStandby(standby);
+        setStandby(standby, m.a_state);
         if(!standby){
           S.liveBuf.push({x:m.t, y:m.signal, h:m.humidity});
           if(m.breath){ S.lastBreathT = m.t; S.breathTimes.push(m.t); S.breathPts.push({x:m.t, y:m.signal}); }
@@ -645,11 +649,13 @@ window.addEventListener('error', function(e){
           const age = (m.camera_raw_age === null || m.camera_raw_age === undefined)
             ? "" : " · " + Number(m.camera_raw_age).toFixed(0) + "s";
           const gate = (m.lux != null && cfg.luxDark != null && m.lux < cfg.luxDark) ? "（暗·不计票）" : "";
-          rawEl.textContent = rl + age + gate;
-          rawEl.className = "v " + (m.camera_raw ? "ok" : "warn");
+          // sub-line of the 相机姿势 tile: raw browser verdict + freshness
+          rawEl.textContent = "原始 " + rl + age + gate;
         }
         put("spo2Val", m.spo2, 1);
         put("hrVal", m.hr, 0);
+        const spEl = $("spo2State");
+        if(spEl) spEl.textContent = ({running:"记录中", idle:"待机", exited:"模块异常", absent:"未接"})[m.spo2_state] || "—";
         const aLabel = {standby:"待机", awake:"清醒", asleep:"已入睡", gap:"离床"}[m.a_state] || (m.standby ? "待机" : "—");
         const camLabel = {lying:"躺下", sitting:"坐起"}[m.camera_posture] || "未知";
         const aEl = $("aState"), cEl = $("cameraPosture");

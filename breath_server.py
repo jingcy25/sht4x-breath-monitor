@@ -390,13 +390,37 @@ def _on_spo2(sample):
         latest["sqi"] = sample.get("sqi")
         latest["spo2_valid"] = sample.get("valid", 0)
         latest["spo2_ts"] = sample.get("ts", time.time())
+        spo2_state["last_sample_ts"] = latest["spo2_ts"]
 
 
 def _on_spo2_status(msg):
     print("[spo2] %s" % msg, flush=True)
+    low = msg.lower()
+    with latest_lock:
+        if "started" in low:
+            spo2_state["status"] = "running"
+            if ": " in msg:
+                spo2_state["csv"] = msg.rsplit(": ", 1)[-1].strip()
+        elif "exited" in low:
+            spo2_state["status"] = "exited"
+        elif "failed" in low or "not found" in low:
+            spo2_state["status"] = "absent"
+        elif "stopped" in low:
+            spo2_state["status"] = "idle"
+        spo2_state["detail"] = msg
 
 
 spo2_worker = None  # created in main() so cwd/root is correct
+
+# Visible SpO2 state: the sensor is optional, so the UI/API must be able to
+# tell "no hardware" from "no finger" from "worker crashed".
+spo2_state = {
+    "status": "idle",   # idle | running | exited | absent
+    "detail": "",
+    "csv": None,
+    "last_sample_ts": 0.0,
+    "hardware": None,   # True/False from an 0x57 probe, None = not probed yet
+}
 
 
 # ---------------------------------------------------------------------------
@@ -470,20 +494,70 @@ def _i2c_present(bus: int, addr: int, timeout_s: float = 1.5, tries: int = 3) ->
 # ---------------------------------------------------------------------------
 # A-layer helpers
 # ---------------------------------------------------------------------------
+class PostureFilter:
+    """Debounce single-frame pose flips from the browser classifier.
+
+    The TM pose model is *confident but unstable* on a blurry frame: it
+    alternates lying/sitting at ~0.9 confidence, and one `sitting` frame used
+    to drop the session out of ASLEEP and reset the sleep-onset timer. A new
+    posture must therefore persist before it replaces the current one, and
+    `sitting` (the "wake up" vote) has to persist longer than `lying`.
+
+    This is temporal smoothing, not a new vote: the A-layer still sees one
+    posture, just a stable one.
+    """
+
+    def __init__(self, hold_s=None, drop_s=8.0):
+        self.current = None
+        self.current_conf = None
+        self.drop_s = float(drop_s)
+        self.hold = {"lying": 2.0, "sitting": 3.0}
+        if hold_s is not None:
+            for key in self.hold:
+                self.hold[key] = float(hold_s)
+        self._cand = None
+        self._cand_since = 0.0
+        self._last_seen = 0.0
+
+    def update(self, t, posture, conf):
+        if posture in ("lying", "sitting"):
+            self._last_seen = t
+            if posture == self.current:
+                self._cand = None
+                self.current_conf = conf
+            else:
+                if self._cand != posture:
+                    self._cand = posture
+                    self._cand_since = t
+                if (t - self._cand_since) >= self.hold.get(posture, 2.0):
+                    self.current = posture
+                    self.current_conf = conf
+                    self._cand = None
+        elif self.current is not None and (t - self._last_seen) > self.drop_s:
+            self.current = None
+            self.current_conf = None
+            self._cand = None
+        return self.current, self.current_conf
+
+
+posture_filter = PostureFilter()
+
+
 def _camera_posture(t, lux):
-    """Return (posture, confidence) only when fresh and lights-on."""
+    """Return the *smoothed* (posture, confidence), gated by ambient light."""
     with camera_lock:
-        posture = camera_state["posture"]
+        raw = camera_state["posture"]
         confidence = camera_state["confidence"]
         ts = camera_state["ts"]
-    if posture is None or (t - ts) > 5.0:
-        return None, None
-    if posture not in ("lying", "sitting"):
+    fresh = raw is not None and (t - ts) <= 6.0
+    posture, smoothed_conf = posture_filter.update(t, raw if fresh else None,
+                                                   confidence if fresh else None)
+    if posture is None:
         return None, None
     # Camera only works when there is light; VEML is the gate.
     if lux is not None and lux < config["lux_dark"]:
         return None, None
-    return posture, confidence
+    return posture, smoothed_conf
 
 
 def _a_confidence(in_bed, posture, lux):
@@ -838,6 +912,7 @@ def sensor_loop():
                 "pi": None if pi is None else round(float(pi), 2),
                 "sqi": None if sqi is None else round(float(sqi), 2),
                 "spo2_valid": int(spo2_valid or 0),
+                "spo2_state": spo2_state["status"],
             }
 
             with latest_lock:
@@ -1053,12 +1128,254 @@ def api_selftest():
         "posture_ts": camera_state.get("ts"),
     }
 
+    # SpO2 is optional hardware; say explicitly whether 0x57 answers at all.
+    hw = _i2c_present(1, 0x57, timeout_s=1.0, tries=1)
+    spo2_state["hardware"] = hw
+    last_ts = spo2_state["last_sample_ts"]
+    out["spo2"] = {
+        "addr": "0x57/i2c-1",
+        "hardware_present": hw,
+        "worker": spo2_state["status"],
+        "detail": spo2_state["detail"],
+        "csv": spo2_state["csv"],
+        "last_sample_age_s": None if not last_ts else round(time.time() - last_ts, 1),
+        "hint": ("MAX30102 未接：查 3.3V / GND / SDA(Pin3) / SCL(Pin5)，"
+                 "i2cdetect -y 1 应看到 0x57") if not hw else
+                ("硬件在位；只有 in_bed 时才启动采集，手指贴住后 UI 才有读数"),
+    }
+
     out["config"] = {k: config[k] for k in ("fsr_in_bed", "fsr_invert", "th_up",
                                             "apnea_sec", "lux_dark", "sleep_onset_s",
                                             "fsr_motion_gate", "fsr_motion_max",
                                             "fsr_motion_wake", "regular_min_breaths",
                                             "silence_counts_as_sleep")}
     return jsonify(out)
+
+
+@app.route("/api/report")
+def api_report():
+    """One-click sleep report: a print-ready HTML page for the last N hours."""
+    try:
+        hours = float(request.args.get("hours", 12))
+    except Exception:
+        hours = 12.0
+    hours = max(1.0, min(72.0, hours))
+    now = time.time()
+    since = now - hours * 3600.0
+
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+
+    # --- A-state segments ---------------------------------------------------
+    cur.execute("SELECT ts, state FROM a_states WHERE ts >= ? ORDER BY ts",
+                (since - 3600.0,))
+    rows = cur.fetchall()
+    segs = []
+    for i, (ts, st) in enumerate(rows):
+        end = rows[i + 1][0] if i + 1 < len(rows) else now
+        if end <= since:
+            continue
+        segs.append((max(ts, since), min(end, now), st))
+
+    dur = {"awake": 0.0, "asleep": 0.0, "gap": 0.0, "standby": 0.0}
+    for a, b, st in segs:
+        dur[st] = dur.get(st, 0.0) + max(0.0, b - a)
+    in_bed_s = dur.get("awake", 0.0) + dur.get("asleep", 0.0)
+
+    # --- samples ------------------------------------------------------------
+    cur.execute("SELECT COUNT(*), SUM(breath), MIN(humidity), AVG(humidity), "
+                "MAX(humidity) FROM samples WHERE ts >= ?", (since,))
+    n_s, n_breath, h_min, h_avg, h_max = cur.fetchone()
+    n_s = n_s or 0
+    n_breath = n_breath or 0
+    sample_hz = 20.0
+    covered_s = n_s / sample_hz if n_s else 0.0
+
+    cur.execute("SELECT CAST(ts/3600 AS INTEGER) h, SUM(breath), COUNT(*) "
+                "FROM samples WHERE ts >= ? GROUP BY h ORDER BY h", (since,))
+    hourly = [(int(h), int(b or 0), int(c or 0)) for h, b, c in cur.fetchall()]
+
+    # --- events -------------------------------------------------------------
+    cur.execute("SELECT start_ts, alarm_ts, end_ts, duration FROM events "
+                "WHERE start_ts >= ? ORDER BY start_ts", (since,))
+    events = cur.fetchall()
+
+    # --- SpO2 ---------------------------------------------------------------
+    cur.execute("SELECT COUNT(*), AVG(spo2), MIN(spo2), AVG(hr) FROM spo2_samples "
+                "WHERE ts >= ? AND valid = 1", (since,))
+    sp_n, sp_avg, sp_min, hr_avg = cur.fetchone()
+    conn.close()
+
+    def hm(sec):
+        sec = int(max(0, sec))
+        if sec < 60:
+            return "%d s" % sec
+        m, s = divmod(sec, 60)
+        if m < 60:
+            return "%d min %02d s" % (m, s)
+        h, m = divmod(m, 60)
+        return "%d h %02d min" % (h, m)
+
+    def clock(ts):
+        return time.strftime("%m-%d %H:%M:%S", time.localtime(ts))
+
+    kpi = [
+        ("在床时长", hm(in_bed_s)),
+        ("入睡时长 (ASLEEP)", hm(dur.get("asleep", 0.0))),
+        ("清醒时长 (AWAKE)", hm(dur.get("awake", 0.0))),
+        ("暂停事件", "%d 次" % len(events)),
+        ("总暂停时长", hm(sum(float(e[3] or 0) for e in events))),
+        ("最长暂停", hm(max([float(e[3] or 0) for e in events], default=0.0))),
+        ("平均呼吸率", ("%.1f 次/分" % (n_breath * 60.0 / covered_s)) if covered_s > 60 else "—"),
+        ("口鼻湿度", ("%.1f → %.1f %%RH（均 %.1f）" % (h_min or 0, h_max or 0, h_avg or 0))
+         if n_s else "—"),
+    ]
+
+    kpi_html = "".join(
+        '<div class="kpi"><div class="k">%s</div><div class="v">%s</div></div>' % (k, v)
+        for k, v in kpi
+    )
+
+    state_rows = "".join(
+        "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+        % ({"awake": "清醒", "asleep": "已入睡", "gap": "离床（间隙）",
+            "standby": "待机"}.get(st, st), clock(a), clock(b), hm(b - a))
+        for a, b, st in segs[-40:]
+    ) or '<tr><td colspan="4" class="muted">该时段没有状态记录</td></tr>'
+
+    max_rate = 0.0
+    hourly_rows = []
+    for h, b, c in hourly:
+        secs = c / sample_hz
+        rate = (b * 60.0 / secs) if secs > 30 else 0.0
+        max_rate = max(max_rate, rate)
+        hourly_rows.append((h, b, rate, secs))
+
+    hour_html = ""
+    for h, b, rate, secs in hourly_rows:
+        width = 0 if max_rate <= 0 else int(100 * rate / max_rate)
+        hour_html += (
+            '<tr><td>%s</td><td>%d</td><td>%.1f</td>'
+            '<td class="bar"><i style="width:%d%%"></i></td></tr>'
+            % (time.strftime("%m-%d %H:00", time.localtime(h * 3600)), b, rate, width)
+        )
+    hour_html = hour_html or '<tr><td colspan="4" class="muted">无样本</td></tr>'
+
+    ev_html = "".join(
+        "<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+        % (i + 1, clock(s), clock(a), hm(float(d or 0)))
+        for i, (s, a, e, d) in enumerate(events)
+    ) or '<tr><td colspan="4" class="muted">该时段未记录到呼吸暂停事件</td></tr>'
+
+    if sp_n:
+        spo2_html = ("<p><b>%d</b> 个有效样本，平均 <b>%.1f%%</b>，最低 <b>%.0f%%</b>，"
+                     "平均心率 <b>%.0f bpm</b>。</p>" % (sp_n, sp_avg or 0, sp_min or 0, hr_avg or 0))
+    else:
+        spo2_html = ('<p class="muted">该时段没有有效血氧样本（MAX30102 未接或未佩戴）。'
+                     '当前状态：%s。</p>' % (spo2_state["status"]))
+
+    html = """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>睡眠报告 %(range)s</title>
+<style>
+  :root{--ink:#11161c;--muted:#6b7684;--line:#dfe5ec;--jade:#1f9d63;--amber:#b7791f}
+  *{box-sizing:border-box}
+  body{margin:0;padding:32px;background:#f6f8fa;color:var(--ink);
+       font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+  .sheet{max-width:900px;margin:0 auto;background:#fff;padding:36px 40px 44px;
+         border:1px solid var(--line);border-radius:14px}
+  h1{margin:0 0 6px;font-size:24px}
+  .sub{color:var(--muted);font-size:13px;line-height:1.7}
+  h2{font-size:15px;margin:30px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px}
+  .kpi>div{border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .kpi .k{font-size:11px;color:var(--muted)}
+  .kpi .v{font-size:16px;font-weight:600;margin-top:4px;font-variant-numeric:tabular-nums}
+  table{width:100%%;border-collapse:collapse;font-size:13px}
+  th,td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left}
+  th{color:var(--muted);font-weight:600;font-size:12px}
+  td.bar{width:34%%}
+  td.bar i{display:block;height:9px;background:var(--jade);border-radius:3px;min-width:1px}
+  .muted{color:var(--muted)}
+  .note{font-size:12px;color:var(--muted);line-height:1.8;margin-top:12px}
+  .toolbar{margin-top:26px;display:flex;gap:10px}
+  button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid var(--line);
+         background:#fff;cursor:pointer}
+  @media print{body{background:#fff;padding:0}.sheet{border:0;border-radius:0}.toolbar{display:none}}
+</style></head><body><div class="sheet">
+  <h1>睡眠呼吸监测报告</h1>
+  <div class="sub">统计区间：%(start)s — %(end)s（最近 %(hours).0f 小时）<br>
+    设备：raspberrypi-09 · 生成于 %(now)s · 采样约 %(hz).0f Hz</div>
+
+  <div class="kpis">%(kpi)s</div>
+
+  <h2>A 状态时间线</h2>
+  <table><thead><tr><th>状态</th><th>开始</th><th>结束</th><th>时长</th></tr></thead>
+  <tbody>%(states)s</tbody></table>
+
+  <h2>呼吸暂停事件</h2>
+  <table><thead><tr><th>#</th><th>暂停开始</th><th>触发报警</th><th>总暂停时长</th></tr></thead>
+  <tbody>%(events)s</tbody></table>
+
+  <h2>每小时呼吸率</h2>
+  <table><thead><tr><th>小时</th><th>呼吸次数</th><th>次/分</th><th>相对强度</th></tr></thead>
+  <tbody>%(hours_rows)s</tbody></table>
+
+  <h2>血氧 / 心率</h2>
+  %(spo2)s
+
+  <div class="note">
+    判定口径：A 层由 FSR 在床锚点 +（开灯时相机躺/坐，关灯时光照）+ 口鼻温湿度呼吸共同决定；
+    只有进入「已入睡」后，连续无呼吸 &gt; %(apnea).0f s 才触发报警（当前入睡判定时长 %(onset).0f s）。<br>
+    局限：SHT4x 单通道易受说话、翻身、口鼻偏移影响；FSR 未标定时在床判定不可靠；
+    本报告为课程演示用途，不构成医学结论。
+  </div>
+
+  <div class="toolbar">
+    <button onclick="window.print()">打印 / 存为 PDF</button>
+    <button onclick="location.href='/api/report.csv?hours=%(hours).0f'">导出 CSV</button>
+  </div>
+</div></body></html>""" % {
+        "range": time.strftime("%m-%d %H:%M", time.localtime(since)),
+        "start": clock(since),
+        "end": clock(now),
+        "now": clock(now),
+        "hours": hours,
+        "hz": sample_hz,
+        "kpi": kpi_html,
+        "states": state_rows,
+        "events": ev_html,
+        "hours_rows": hour_html,
+        "spo2": spo2_html,
+        "apnea": config["apnea_sec"],
+        "onset": config["sleep_onset_s"],
+    }
+    return Response(html, mimetype="text/html")
+
+
+@app.route("/api/report.csv")
+def api_report_csv():
+    """Same window as /api/report, but raw rows for the appendix."""
+    try:
+        hours = float(request.args.get("hours", 12))
+    except Exception:
+        hours = 12.0
+    hours = max(1.0, min(72.0, hours))
+    since = time.time() - hours * 3600.0
+    conn = sqlite3.connect(DB)
+    rows = conn.execute(
+        "SELECT ts, humidity, signal, breath, apnea FROM samples WHERE ts >= ? "
+        "ORDER BY ts", (since,)).fetchall()
+    conn.close()
+
+    def gen():
+        yield "ts,iso_time,humidity,signal,breath,apnea\n"
+        for ts, hum, sig, br, ap in rows:
+            yield "%s,%s,%s,%s,%s,%s\n" % (
+                ts, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)),
+                hum, sig, br, ap)
+    return Response(gen(), mimetype="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=sleep_report.csv"})
 
 
 @app.route("/api/config", methods=["POST"])
