@@ -353,7 +353,7 @@ window.addEventListener('error', function(e){
   const fmtHM = ts => new Date(ts*1000).toLocaleTimeString("zh-CN",{hour12:false,hour:"2-digit",minute:"2-digit"});
   const isHttp = location.protocol === "http:" || location.protocol === "https:";
 
-  const cfg = { thUp: 1.2, apneaSec: 20, warnSec: 10, liveWindow: 30, live: false, host: "raspberrypi.local:8000", fsr: 0.10, fsrInvert: false, luxDark: 10 };
+  const cfg = { thUp: 1.2, apneaSec: 20, warnSec: 10, liveWindow: 30, live: false, connected: false, host: "raspberrypi.local:8000", fsr: 0.10, fsrInvert: false, luxDark: 10 };
 
   const S = {
     t: 0, period: 4.0, amp: 3.2, baseline: 45.0, tempBase: 26.4,
@@ -664,23 +664,34 @@ window.addEventListener('error', function(e){
   }
   // The dashboard must survive a dropped/backgrounded socket: without this the
   // numbers simply stop moving and the page looks frozen.
+  //   cfg.live      = the user's mode switch (live vs demo replay)
+  //   cfg.connected = the socket is actually up
+  // Keeping those separate is what lets the reconnect loop run at all.
   let lastMsgAt = 0, reconnectTimer = null, staleTimer = null;
   function scheduleReconnect(){
     if(reconnectTimer || !cfg.live) return;
     reconnectTimer = setTimeout(()=>{
       reconnectTimer = null;
-      if(cfg.live) connectReal(cfg.host);
+      if(cfg.live && !cfg.connected) connectReal(cfg.host);
     }, 2000);
   }
   function startStaleWatch(){
     if(staleTimer) return;
     staleTimer = setInterval(()=>{
-      if(!cfg.live || !lastMsgAt) return;
+      if(!cfg.live) return;
+      if(!cfg.connected){
+        // Only reconnect once the old socket is really gone.
+        if(!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING){
+          scheduleReconnect();
+        }
+        return;
+      }
+      if(!lastMsgAt) return;
       const age = (Date.now() - lastMsgAt) / 1000;
       if(age > 4){
         setSourceBadge(false);
         $("srcText").textContent = "断线 " + Math.round(age) + " s";
-        if(ws && ws.readyState === WebSocket.CLOSED) scheduleReconnect();
+        scheduleReconnect();
       }
     }, 1000);
   }
@@ -688,9 +699,9 @@ window.addEventListener('error', function(e){
     if(liveTimer){ clearInterval(liveTimer); liveTimer = null; }
   }
   function setSourceBadge(live){
-    cfg.live = live;
+    cfg.connected = live;
     const b = $("srcBadge"); b.classList.toggle("live", live);
-    $("srcText").textContent = live ? "实时模式" : "演示模式";
+    $("srcText").textContent = live ? "实时模式" : (cfg.live ? "断线" : "演示模式");
   }
   function pushConfig(){
     if(!cfg.live) return;
@@ -708,15 +719,18 @@ window.addEventListener('error', function(e){
   });
   $("modeSwitch").addEventListener("click", ()=>{
     const on = !cfg.live;
+    cfg.live = on;
     $("modeSwitch").classList.toggle("on", on);
     $("hostField").style.display = on ? "" : "none";
     if(on){
       cfg.host = $("host").value.trim() || cfg.host;
       connectReal(cfg.host);
     } else {
+      if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
       if(ws){ try{ws.close();}catch(e){} ws=null; }
       stopLiveTimer();
       setSourceBadge(false);
+      $("srcText").textContent = "演示模式";
     }
   });
   $("thUp").addEventListener("change", e=>{ cfg.thUp = clamp(+e.target.value||1.2, 0.1, 5); pushConfig(); });
