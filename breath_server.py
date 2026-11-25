@@ -291,29 +291,39 @@ def init_db():
     conn.close()
 
 
-def _i2c_present(bus: int, addr: int, timeout_s: float = 1.5) -> bool:
-    """Probe an I2C address in a child process.
+def _i2c_present(bus: int, addr: int, timeout_s: float = 1.5, tries: int = 3) -> bool:
+    """Probe an I2C address in a child process using an SMBus quick write.
 
-    A missing SHT4x (or a software I2C bus with no device) can block an
-    ``smbus2`` read indefinitely. Probing with ``timeout`` keeps the main
-    acquisition loop alive when a sensor is unplugged.
+    A quick write only sends the address + write bit and waits for ACK, which
+    is exactly what ``i2cdetect`` does.  A plain ``read_byte`` is *not* a valid
+    presence test: SHT4x NACKs any bare read until it receives a measurement
+    command (0xFD), so read-probing wrongly reported "SHT4x not found".
+
+    The probe runs under ``timeout`` because a missing device on a software
+    I2C bus can block ``smbus2`` indefinitely.  A single NACK right after boot
+    (bus busy while the camera opens) is normal, so retry a few times.
     """
     code = (
         "import smbus2; "
         "b=smbus2.SMBus(%d); "
-        "print(b.read_byte(%d)); "
+        "b.write_quick(%d); "
         "b.close()" % (bus, addr)
     )
-    try:
-        proc = subprocess.run(
-            ["timeout", str(timeout_s), sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=timeout_s + 1.0,
-        )
-        return proc.returncode == 0
-    except Exception:
-        return False
+    for attempt in range(tries):
+        try:
+            proc = subprocess.run(
+                ["timeout", str(timeout_s), sys.executable, "-c", code],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s + 1.0,
+            )
+            if proc.returncode == 0:
+                return True
+        except Exception:
+            pass
+        if attempt + 1 < tries:
+            time.sleep(0.4)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -349,36 +359,52 @@ def _a_confidence(in_bed, posture, lux):
 # ---------------------------------------------------------------------------
 # acquisition / fusion loop
 # ---------------------------------------------------------------------------
+def _init_sensor(kind: str):
+    """Create one sensor object, or return None when it is not wired."""
+    if kind == "breath":
+        addr, label = 0x44, "SHT4x"
+        if not _i2c_present(1, addr):
+            return None
+        try:
+            return breath_sensors.SHT4x(1)
+        except Exception as exc:
+            print("%s unavailable: %s" % (label, exc), flush=True)
+            return None
+    if kind == "light":
+        addr, label = 0x10, "VEML7700"
+        if not _i2c_present(1, addr):
+            return None
+        try:
+            return breath_sensors.VEML7700(1)
+        except Exception as exc:
+            print("%s unavailable: %s" % (label, exc), flush=True)
+            return None
+    if kind == "adc":
+        addr, label = 0x48, "ADS1115"
+        if not _i2c_present(1, addr):
+            return None
+        try:
+            return breath_sensors.ADS1115(1)
+        except Exception as exc:
+            print("%s unavailable: %s" % (label, exc), flush=True)
+            return None
+    raise ValueError(kind)
+
+
 def sensor_loop():
-    if _i2c_present(1, 0x44):
-        try:
-            breath_sensor = breath_sensors.SHT4x(1)
-        except Exception as exc:
-            breath_sensor = None
-            print("SHT4x breath sensor unavailable: %s" % exc, flush=True)
-    else:
-        breath_sensor = None
-        print("SHT4x breath sensor not found at 0x44 (i2c-1)", flush=True)
+    breath_sensor = _init_sensor("breath")
+    if breath_sensor is None:
+        print("SHT4x breath sensor not found at 0x44 (i2c-1); will retry", flush=True)
 
-    if _i2c_present(1, 0x10):
-        try:
-            light_sensor = breath_sensors.VEML7700(1)
-        except Exception as exc:
-            light_sensor = None
-            print("VEML7700 unavailable: %s" % exc, flush=True)
-    else:
-        light_sensor = None
-        print("VEML7700 not found at 0x10 (i2c-1)", flush=True)
+    light_sensor = _init_sensor("light")
+    if light_sensor is None:
+        print("VEML7700 not found at 0x10 (i2c-1); will retry", flush=True)
 
-    if _i2c_present(1, 0x48):
-        try:
-            adc = breath_sensors.ADS1115(1)
-        except Exception as exc:
-            adc = None
-            print("ADS1115 unavailable: %s" % exc, flush=True)
-    else:
-        adc = None
-        print("ADS1115 not found at 0x48 (i2c-1)", flush=True)
+    adc = _init_sensor("adc")
+    if adc is None:
+        print("ADS1115 not found at 0x48 (i2c-1); will retry", flush=True)
+
+    last_probe = time.time()
 
     env_temp = env_hum = None
     lux = None
@@ -406,6 +432,7 @@ def sensor_loop():
     gap_until = 0.0
     last_temp = 0.0
     last_h = 0.0
+    last_standby = 0.0
 
     while True:
         try:
@@ -473,6 +500,24 @@ def sensor_loop():
                     except Exception:
                         lux = None
                 last_slow = t
+
+            # hot-plug retry: pick up sensors connected after the service started
+            if (t - last_probe) > 5.0 and (
+                breath_sensor is None or light_sensor is None or adc is None
+            ):
+                last_probe = t
+                if breath_sensor is None:
+                    breath_sensor = _init_sensor("breath")
+                    if breath_sensor is not None:
+                        print("SHT4x connected at 0x44 (i2c-1)", flush=True)
+                if light_sensor is None:
+                    light_sensor = _init_sensor("light")
+                    if light_sensor is not None:
+                        print("VEML7700 connected at 0x10 (i2c-1)", flush=True)
+                if adc is None:
+                    adc = _init_sensor("adc")
+                    if adc is not None:
+                        print("ADS1115 connected at 0x48 (i2c-1)", flush=True)
 
             posture, posture_conf = _camera_posture(t, lux)
 
@@ -554,6 +599,15 @@ def sensor_loop():
                     a_state = "gap" if t < gap_until else "standby"
                     sleep_since = None
                     alarm_event.clear()
+                    # Standby readout only (display/sensor health); never feeds
+                    # the breath detector and never raises an alarm.
+                    if breath_sensor is not None and (t - last_standby) > 2.0:
+                        last_standby = t
+                        try:
+                            last_temp, last_h = breath_sensor.read()
+                            temp, h = last_temp, last_h
+                        except Exception:
+                            pass
 
             # SpO2 is logging-only; no 20 s vote
             with latest_lock:
