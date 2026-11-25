@@ -649,6 +649,11 @@ def sensor_loop():
                 conn.commit()
                 last_a_state = a_state
 
+            with camera_lock:
+                raw_posture = camera_state["posture"]
+                raw_conf = camera_state["confidence"]
+                raw_ts = camera_state["ts"]
+
             msg = {
                 "t": t,
                 "humidity": round(h, 2),
@@ -663,6 +668,10 @@ def sensor_loop():
                 "a_confidence": _a_confidence(in_bed, posture, lux),
                 "camera_posture": posture,
                 "camera_conf": None if posture_conf is None else round(float(posture_conf), 3),
+                # raw browser result before the lux gate, for debugging the link
+                "camera_raw": raw_posture,
+                "camera_raw_conf": None if raw_conf is None else round(float(raw_conf), 3),
+                "camera_raw_age": None if not raw_ts else round(t - raw_ts, 1),
                 "env_temp": None if env_temp is None else round(env_temp, 1),
                 "env_hum": None if env_hum is None else round(env_hum, 1),
                 "lux": None if lux is None else round(lux, 1),

@@ -104,9 +104,25 @@ PoseNet 主干用本地 `static/posenet/mobilenet/float/075/`（MobileNetV1 0.75
 | `GET /api/history?range=1h|24h` | 呼吸频率 + 事件 |
 | `GET /api/events` | 事件（总暂停时长） |
 | `POST /api/config` | `th_up/apnea_sec/fsr_in_bed/fsr_invert` |
+| `GET /api/selftest` | 一键硬件自检（各传感器读数 + ADC 四通道摆动） |
 | `GET /api/export.csv` | 原始样本 |
 | `GET /api/alarm_state` / `GET /api/test_alarm` | 报警状态/自检 |
 | `WS /ws` | 50 ms 推送 |
+
+## 硬件自检（接线/演示前必做）
+
+```bash
+curl -s http://127.0.0.1:8000/api/selftest | python3 -m json.tool
+```
+
+判读要点：
+
+- `sht4x.ok=true` 且 `temp_c/rh_pct` 有值 → 口鼻 SHT4x 正常（待机也在读，2 s 一次，只显示不检测）。
+- `veml7700.lux` < `lux_dark`（默认 10）→ 视为“暗”，**摄像头姿态票会被丢弃**；演示时开灯，让 lux > 10。
+- `ads1115.verdict=floating` → AIN0 在无负载时摆动 > 0.2 V，说明 FSR 没真正接到 ADC（或分压缺下拉电阻），此时 FSR 阈值怎么调都没意义。
+- `camera.ok=true` + `frame_age_s` < 3 → Pi 侧取流正常；页面没画面就是浏览器端的问题。
+
+I²C 探测用 **SMBus quick write**（等价 `i2cdetect`）。注意不能用 `read_byte(0x44)` 判断 SHT4x 是否存在：SHT4x 在收到测量命令 `0xFD` 前会对裸读 NACK，会误报“未接”。启动时探测失败会自动重试，之后每 5 s 重试一次，因此**热插拔不需要重启服务**。
 
 ## P0 修复点
 
@@ -119,8 +135,9 @@ PoseNet 主干用本地 `static/posenet/mobilenet/float/075/`（MobileNetV1 0.75
 ## 已知限制
 
 - 摄像头页面必须打开；关闭后 A 层无相机票（FSR+光照兜底）。
+- 摄像头只在 `lux >= lux_dark`（默认 10）时计票；暗房间里姿态一律记 `unknown`。
 - TM Pose 模型依赖 PoseNet 主干；Pi 侧不做推理，浏览器/手机需要能跑 WebGL/WASM。
-- FSR 阈值/极性未实测；三档只是占位，务必标定。
+- FSR 阈值/极性未实测；三档只是占位，务必先用 `/api/selftest` 确认 `verdict=stable` 再标定。
 - SHT4x 单通道 B 仍受说话/翻身/离口鼻影响；A 门控 + 不应期 + 手动取消是必要冗余。
 - SpO₂ 为教学级，绝对读数不作医疗依据。
 - `spo2/` 子进程若退出（无手指/无硬件），UI 显示 `--`，不影响主服务。
