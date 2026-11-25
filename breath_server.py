@@ -1205,6 +1205,9 @@ def api_report():
     cur.execute("SELECT COUNT(*), AVG(spo2), MIN(spo2), AVG(hr) FROM spo2_samples "
                 "WHERE ts >= ? AND valid = 1", (since,))
     sp_n, sp_avg, sp_min, hr_avg = cur.fetchone()
+    cur.execute("SELECT ts, spo2, hr FROM spo2_samples WHERE ts >= ? AND valid = 1 "
+                "AND spo2 IS NOT NULL ORDER BY ts", (since,))
+    spo2_series = cur.fetchall()
     conn.close()
 
     def hm(sec):
@@ -1316,6 +1319,37 @@ def api_report():
     state_summary = "".join(rows_summary) or \
         '<tr><td colspan="4" class="muted">该时段没有状态记录</td></tr>'
 
+    # --- SpO2 strip (same time axis as the state timeline) ------------------
+    spo2_chart = ""
+    if spo2_series:
+        y_lo, y_hi, ch, top = 85.0, 100.0, 64.0, 10.0
+
+        def ypix(v):
+            v = max(y_lo, min(y_hi, float(v)))
+            return top + (y_hi - v) / (y_hi - y_lo) * ch
+
+        pts = " ".join(f"{xpix(t):.1f},{ypix(v):.1f}" for t, v, _h in spo2_series)
+        chart_h = top + ch + 16
+        cover_min = max(0.0, (spo2_series[-1][0] - spo2_series[0][0]) / 60.0)
+        below = sum(1 for _t, v, _h in spo2_series if v < 90)
+        caption = ("%d 个有效样本，覆盖 %.0f 分钟" % (len(spo2_series), cover_min)
+                   + ("，其中 %d 个 &lt; 90%%" % below if below else ""))
+        spo2_chart = (
+            f'<div class="note" style="margin:0 0 6px">{caption}</div>'
+            f'<svg viewBox="0 0 {W:.0f} {chart_h:.0f}" width="100%" height="130" '
+            f'preserveAspectRatio="none" role="img" aria-label="SpO2 曲线">'
+            f'<line x1="{PAD:.1f}" y1="{ypix(90):.1f}" x2="{W - PAD:.1f}" '
+            f'y2="{ypix(90):.1f}" stroke="#f0b8b8" stroke-dasharray="4 3"/>'
+            f'<text x="{PAD + 2:.1f}" y="{ypix(90) - 3:.1f}" font-size="9" '
+            f'fill="#c05621">90%</text>'
+            f'<polyline fill="none" stroke="#1f9d63" stroke-width="1.5" points="{pts}"/>'
+            f'<text x="{PAD:.1f}" y="{chart_h - 3:.1f}" font-size="9" fill="#8a97a6">'
+            f'{hhmm(since)}</text>'
+            f'<text x="{W - PAD:.1f}" y="{chart_h - 3:.1f}" font-size="9" fill="#8a97a6" '
+            f'text-anchor="end">{hhmm(now)}</text>'
+            f'</svg>'
+        )
+
     max_rate = 0.0
     hourly_rows = []
     for h, b, c in hourly:
@@ -1402,6 +1436,7 @@ def api_report():
   <tbody>%(hours_rows)s</tbody></table>
 
   <h2>血氧 / 心率</h2>
+  %(spo2_chart)s
   %(spo2)s
 
   <div class="note">
@@ -1430,6 +1465,7 @@ def api_report():
         "events": ev_html,
         "hours_rows": hour_html,
         "spo2": spo2_html,
+        "spo2_chart": spo2_chart,
         "apnea": config["apnea_sec"],
         "onset": config["sleep_onset_s"],
     }

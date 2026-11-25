@@ -130,9 +130,18 @@ class SpO2Worker:
 
     # --------------------------------------------------------------- tail
     def _tail_loop(self) -> None:
+        """Follow the summary CSV as it is appended.
+
+        The oxy monitor writes one row per emitted window and flushes, so this
+        is a real tail.  Rows are parsed one at a time with ``csv.reader`` on a
+        single line rather than ``csv.DictReader``: a DictReader bound to the
+        file stops for good at the first EOF, which made the live tail emit
+        nothing while the file was still growing.
+        """
         handle = None
-        reader = None
+        fields = None
         current_path = None
+        rows = 0
         try:
             while not self._stop.is_set():
                 path = self._path
@@ -143,34 +152,42 @@ class SpO2Worker:
                         except Exception:
                             pass
                     handle = None
-                    reader = None
+                    fields = None
                     current_path = path
 
                 if path and handle is None and os.path.exists(path):
                     try:
                         handle = open(path, "r", newline="", encoding="utf-8")
                         header = handle.readline()
-                        if not header:
+                        if not header.strip():
+                            # monitor created the file but has not flushed yet
                             handle.close()
                             handle = None
                         else:
                             fields = next(csv.reader([header]))
-                            reader = csv.DictReader(handle, fieldnames=fields)
+                            self.on_status("tail watching %s (cols=%d)"
+                                           % (os.path.basename(path), len(fields)))
                     except Exception as exc:
                         self.on_status("SpO2 open failed: %s" % exc)
                         handle = None
-                        reader = None
+                        fields = None
 
-                if handle is not None and reader is not None:
+                if handle is not None and fields:
                     try:
                         line = handle.readline()
-                        if line:
-                            row = next(reader)
-                            if row != self._last_row:
-                                self._last_row = row
-                                self._emit(row)
-                    except StopIteration:
-                        pass
+                        if line and line.strip():
+                            values = next(csv.reader([line]))
+                            if len(values) == len(fields):
+                                row = dict(zip(fields, values))
+                                if row != self._last_row:
+                                    self._last_row = row
+                                    self._emit(row)
+                                    rows += 1
+                                    if rows % 10 == 0:
+                                        self.on_status(
+                                            "tail rows=%d spo2=%s valid=%s"
+                                            % (rows, row.get("spo2_pct"),
+                                               row.get("valid")))
                     except Exception as exc:
                         self.on_status("SpO2 parse failed: %s" % exc)
 
@@ -180,6 +197,7 @@ class SpO2Worker:
                     self._stop.set()
                     break
                 time.sleep(self.poll_s)
+            self.on_status("tail stopped after %d rows" % rows)
         finally:
             if handle is not None:
                 try:
