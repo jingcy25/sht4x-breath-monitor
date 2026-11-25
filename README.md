@@ -136,11 +136,14 @@ I²C 探测用 **SMBus quick write**（等价 `i2cdetect`）。注意不能用 `
 
 ## P0 修复点
 
-- 事件时长：`events.start_ts` 现在是**暂停起点**（上次呼吸），`duration = end - start`；不再少 20 s。
+- 事件时长：`events.start_ts` 现在是**暂停起点**（上次呼吸），`duration = end - start`；不再少 20 s。暂停中离床也会把这条事件落库，不再丢。
 - 迟滞：`BreathDetector` 加 1.5 s 不应期 + 5 s 超时复位，避免卡在 `high` 漏呼吸。
 - A 层：`a_state = standby/awake/asleep/gap`；B 只在 `asleep` 使能。
 - FSR 不再做 B；1 Hz 只做在床/体动。
 - LED 用 GPIO27，与同学接线一致。
+- **WebSocket 不再阻塞采集**：以前在采集线程里直接 `client.send()`，浏览器标签被后台节流/半开连接时发送缓冲填满，`send` 永久阻塞，整个采样循环（连同报警判定）一起冻住。现在采样线程只把消息丢进 `queue.Queue(maxsize=1)`，由独立 `ws_publisher` 线程发送，并用 `select` 检查可写性，不读的客户端直接踢掉；另加 `loop_watchdog`，循环停摆 >15 s 会打 `WARNING: sensor loop stale`。
+- **仪表盘自动重连**：断线 4 s 后角标显示 `断线 N s` 并每 2 s 重连，不再表现为“页面卡死”。
+- **沉默也是入睡信号**：进入 `asleep` 原本要求“30 s 内 ≥3 次呼吸”，于是在入睡前就停呼吸的人永远进不了 `asleep`、永远不报警。现在“无呼吸时长 > `apnea_sec`”同样算满足入睡条件（`silence_counts_as_sleep`，可用 `POST /api/config {"silence_counts_as_sleep": false}` 关闭，恢复严格模式）。
 
 ## 已知限制
 
