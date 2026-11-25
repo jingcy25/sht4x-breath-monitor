@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>呼吸监测仪 · 仪表盘</title>
+<!--
+  设计系统（床头夜间监测仪）：
+  - 深色低眩光主题：夜间床头使用，弱光不刺眼
+  - 语义色：青绿=正常呼吸 / 琥珀=预警 / 红=报警（颜色承载含义，不作装饰）
+  - 排版：Plus Jakarta Sans（UI）+ JetBrains Mono（遥测数字，等宽不跳动）
+  - 数据墨水优先：弱化网格线，让波形与状态说话
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root{
+    --bg:#0b0e13;
+    --panel:#12161d;
+    --panel2:#161b24;
+    --line:#1e2632;
+    --ink:#e8eef6;
+    --muted:#8b96a6;
+    --faint:#5c6674;
+    --mint:#2dd4bf;
+    --mint-dim:rgba(45,212,191,.13);
+    --amber:#f5b942;
+    --red:#ff5f5f;
+    --red-dim:rgba(255,95,95,.14);
+    --blue:#7aa7ff;
+    --mono:"JetBrains Mono","Cascadia Mono",Consolas,monospace;
+    --sans:"Plus Jakarta Sans","PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--sans);
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    padding:0 20px 28px;
+  }
+  .shell{max-width:1460px;margin:0 auto}
+
+  /* ---------- top bar ---------- */
+  .topbar{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:18px 4px;gap:16px;flex-wrap:wrap;
+  }
+  .brand{display:flex;align-items:center;gap:12px}
+  .brand .logo{
+    width:34px;height:34px;border-radius:9px;
+    background:linear-gradient(180deg,rgba(45,212,191,.22),rgba(45,212,191,.06));
+    border:1px solid rgba(45,212,191,.35);
+    display:grid;place-items:center;
+  }
+  .brand .logo svg{width:18px;height:18px}
+  .brand h1{font-size:18px;font-weight:700;margin:0;letter-spacing:-.01em}
+  .brand .tag{font-size:11.5px;color:var(--muted);margin:0}
+  .top-right{display:flex;align-items:center;gap:14px}
+  .clock{font-family:var(--mono);font-size:14px;color:var(--muted)}
+  .src-badge{
+    font-size:12px;font-weight:600;padding:5px 11px;border-radius:999px;
+    display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);
+    background:var(--panel);
+  }
+  .src-badge .dot{width:7px;height:7px;border-radius:50%;background:var(--amber)}
+  .src-badge.live .dot{background:var(--mint);box-shadow:0 0 0 0 rgba(45,212,191,.5);animation:dotpulse 2s infinite}
+  @keyframes dotpulse{0%{box-shadow:0 0 0 0 rgba(45,212,191,.5)}70%{box-shadow:0 0 0 6px rgba(45,212,191,0)}100%{box-shadow:0 0 0 0 rgba(45,212,191,0)}}
+  .icon-btn{
+    background:var(--panel);border:1px solid var(--line);color:var(--ink);
+    width:38px;height:38px;border-radius:10px;cursor:pointer;display:grid;place-items:center;
+    transition:border-color .15s,transform .1s;
+  }
+  .icon-btn:hover{border-color:var(--mint)}
+  .icon-btn:active{transform:scale(.94)}
+  .icon-btn svg{width:18px;height:18px}
+
+  /* ---------- layout ---------- */
+  .grid{display:grid;grid-template-columns:1.55fr 1fr;gap:16px;margin-top:4px}
+  @media (max-width:980px){.grid{grid-template-columns:1fr}}
+
+  .card{
+    background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    padding:20px;
+  }
+  .card h2{
+    font-size:13px;font-weight:600;color:var(--muted);margin:0 0 14px;
+    letter-spacing:.04em;display:flex;align-items:center;gap:8px;text-transform:uppercase;
+  }
+  .card h2::before{content:"";width:3px;height:14px;border-radius:2px;background:var(--mint)}
+
+  /* ---------- hero status card ---------- */
+  .hero{display:flex;align-items:center;gap:26px;min-height:150px}
+  .breath-ring{position:relative;width:120px;height:120px;flex:none}
+  .breath-ring .ring{
+    position:absolute;inset:0;border-radius:50%;
+    border:1.5px solid rgba(45,212,191,.4);
+  }
+  .breath-ring .core{
+    position:absolute;left:50%;top:50%;width:56px;height:56px;margin:-28px 0 0 -28px;
+    border-radius:50%;background:var(--mint-dim);border:1px solid rgba(45,212,191,.5);
+    display:grid;place-items:center;transition:transform .18s ease;
+  }
+  .breath-ring .core::after{
+    content:"";width:16px;height:16px;border-radius:50%;background:var(--mint);
+  }
+  .hero.alarm .ring{border-color:rgba(255,95,95,.6);animation:ringpulse 1.3s infinite}
+  .hero.alarm .core{background:var(--red-dim);border-color:rgba(255,95,95,.6)}
+  .hero.alarm .core::after{background:var(--red)}
+  .hero.warn .ring{border-color:rgba(245,185,66,.55)}
+  @keyframes ringpulse{
+    0%{box-shadow:0 0 0 0 rgba(255,95,95,.5)}
+    70%{box-shadow:0 0 0 22px rgba(255,95,95,0)}
+    100%{box-shadow:0 0 0 0 rgba(255,95,95,0)}
+  }
+  .hero-main{flex:1;min-width:0}
+  .hero-state{font-size:26px;font-weight:700;letter-spacing:-.01em}
+  .hero-state .sub{font-size:13px;font-weight:500;color:var(--muted);margin-top:2px}
+  .hero-state.normal{color:var(--mint)}
+  .hero-state.warn{color:var(--amber)}
+  .hero-state.alarm{color:var(--red)}
+  .hero-num{display:flex;align-items:baseline;gap:10px;margin-top:14px}
+  .hero-num .val{font-family:var(--mono);font-size:44px;font-weight:600;line-height:1}
+  .hero-num .unit{color:var(--muted);font-size:14px}
+  .hero-num .lbl{color:var(--muted);font-size:13px}
+
+  /* ---------- stat tiles ---------- */
+  .tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .tile{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:13px 14px}
+  .tile .k{font-size:11.5px;color:var(--muted);letter-spacing:.03em}
+  .tile .v{font-family:var(--mono);font-size:21px;font-weight:600;margin-top:5px}
+  .tile .u{font-size:12px;color:var(--faint);margin-left:3px;font-family:var(--sans)}
+  .tile .v.ok{color:var(--mint)}
+  .tile .v.warn{color:var(--amber)}
+  .tile .v.bad{color:var(--red)}
+
+  /* ---------- charts ---------- */
+  .chart-box{position:relative;height:230px}
+  .chart-box.tall{height:250px}
+
+  /* ---------- events ---------- */
+  .events{list-style:none;margin:0;padding:0;max-height:230px;overflow:auto}
+  .events li{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:9px 2px;border-bottom:1px solid var(--line);font-size:13px;
+  }
+  .events li:last-child{border-bottom:none}
+  .events .t{font-family:var(--mono);color:var(--ink)}
+  .events .d{font-family:var(--mono);color:var(--red);font-weight:600}
+  .events .empty{color:var(--faint);text-align:center;padding:26px 0;font-size:13px}
+
+  /* ---------- history header ---------- */
+  .hist-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .seg{display:inline-flex;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:3px}
+  .seg button{
+    background:none;border:none;color:var(--muted);font-family:var(--sans);font-size:12.5px;
+    padding:5px 12px;border-radius:7px;cursor:pointer;font-weight:600;
+  }
+  .seg button.active{background:var(--mint-dim);color:var(--mint)}
+  .history{margin-top:16px}
+
+  /* ---------- settings panel ---------- */
+  .panel{
+    position:fixed;right:18px;bottom:18px;width:300px;z-index:30;
+    background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    box-shadow:0 18px 50px rgba(0,0,0,.5);
+    transform:translateY(calc(100% + 24px));opacity:0;pointer-events:none;
+    transition:transform .22s ease,opacity .22s ease;
+  }
+  .panel.open{transform:translateY(0);opacity:1;pointer-events:auto}
+  .panel .phead{padding:14px 16px;border-bottom:1px solid var(--line);font-weight:700;font-size:14px}
+  .panel .pbody{padding:14px 16px;display:grid;gap:14px}
+  .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+  .field input[type=number],.field input[type=text]{
+    width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);
+    border-radius:9px;padding:8px 10px;font-family:var(--mono);font-size:13px;
+  }
+  .field input:focus{outline:none;border-color:var(--mint)}
+  .switch{display:flex;align-items:center;justify-content:space-between}
+  .switch .lbl{font-size:12px;color:var(--muted)}
+  .switch .track{
+    width:40px;height:22px;border-radius:999px;background:var(--panel2);
+    border:1px solid var(--line);position:relative;cursor:pointer;transition:background .15s;
+  }
+  .switch .track::after{
+    content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;
+    background:var(--muted);transition:left .15s,background .15s;
+  }
+  .switch.on .track{background:var(--mint-dim);border-color:rgba(45,212,191,.4)}
+  .switch.on .track::after{left:20px;background:var(--mint)}
+  .btn{
+    width:100%;background:var(--mint-dim);color:var(--mint);border:1px solid rgba(45,212,191,.35);
+    border-radius:9px;padding:9px;font-family:var(--sans);font-weight:700;font-size:13px;cursor:pointer;
+  }
+  .btn:hover{background:rgba(45,212,191,.2)}
+
+  .footnote{margin-top:14px;font-size:12px;color:var(--faint);text-align:center}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ============ top bar ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 12c2-6 6-6 9 0s7 6 9 0"/>
+          <path d="M3 12c2 6 6 6 9 0s7-6 9 0"/>
+        </svg>
+      </div>
+      <div>
+        <h1>呼吸监测仪</h1>
+        <p class="tag">SHT4x · 呼吸暂停报警</p>
+      </div>
+    </div>
+    <div class="top-right">
+      <span class="clock" id="clock">--:--:--</span>
+      <span class="src-badge" id="srcBadge"><span class="dot"></span><span id="srcText">演示模式</span></span>
+      <button class="icon-btn" id="settingsBtn" title="参数设置" aria-label="参数设置">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ============ main grid ============ -->
+  <div class="grid">
+    <section class="col-main">
+      <!-- hero -->
+      <div class="card hero" id="hero">
+        <div class="breath-ring">
+          <div class="ring"></div>
+          <div class="core" id="core"></div>
+        </div>
+        <div class="hero-main">
+          <div class="hero-state normal" id="heroState">
+            <div id="stateText">正常呼吸</div>
+            <div class="sub" id="stateSub">呼吸平稳 · 无异常</div>
+          </div>
+          <div class="hero-num">
+            <span class="val" id="bpmBig">15</span>
+            <span class="unit">次/分</span>
+            <span class="lbl">呼吸频率</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- live chart -->
+      <div class="card" style="margin-top:16px">
+        <h2>实时呼吸信号 <span style="color:var(--faint);text-transform:none;font-weight:400">最近 30 秒 · 去基线</span></h2>
+        <div class="chart-box"><canvas id="liveChart"></canvas></div>
+      </div>
+    </section>
+
+    <aside class="col-side">
+      <!-- stat tiles -->
+      <div class="card">
+        <h2>实时指标</h2>
+        <div class="tiles">
+          <div class="tile"><div class="k">当前湿度</div><div class="v ok" id="humVal">45.0<span class="u">%RH</span></div></div>
+          <div class="tile"><div class="k">温度</div><div class="v ok" id="tempVal">26.4<span class="u">°C</span></div></div>
+          <div class="tile"><div class="k">距上次呼吸</div><div class="v ok" id="sinceVal">0.0<span class="u">s</span></div></div>
+          <div class="tile"><div class="k">暂停计时</div><div class="v ok" id="apneaVal">0<span class="u">s</span></div></div>
+          <div class="tile"><div class="k">暂停事件</div><div class="v ok" id="countVal">0<span class="u">次</span></div></div>
+          <div class="tile"><div class="k">报警阈值</div><div class="v" id="thVal">20<span class="u">s</span></div></div>
+        </div>
+      </div>
+
+      <!-- events -->
+      <div class="card" style="margin-top:16px">
+        <h2>呼吸暂停事件</h2>
+        <ul class="events" id="eventsList">
+          <li class="empty">暂无事件</li>
+        </ul>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ============ history ============ -->
+  <section class="card history">
+    <div class="hist-head">
+      <h2 style="margin:0">历史呼吸频率</h2>
+      <div class="seg" id="rangeSeg">
+        <button data-r="1" class="active">近 1 小时</button>
+        <button data-r="24">近 24 小时</button>
+      </div>
+    </div>
+    <div class="chart-box tall" style="margin-top:16px"><canvas id="historyChart"></canvas></div>
+  </section>
+
+  <p class="footnote">演示数据 · 接入树莓派后在「参数」中切换为实时模式。本设备仅作呼吸活动监测，非医疗级诊断。</p>
+</div>
+
+<!-- ============ settings panel ============ -->
+<div class="panel" id="panel">
+  <div class="phead">参数设置</div>
+  <div class="pbody">
+    <div class="field">
+      <label>呼吸阈值 thUp（%RH，信号向上越过记为呼气）</label>
+      <input type="number" id="thUp" step="0.1" min="0.1" max="5" value="0.5">
+    </div>
+    <div class="field">
+      <label>报警阈值（秒，连续无呼吸即报警）</label>
+      <input type="number" id="apneaSec" step="1" min="5" max="120" value="20">
+    </div>
+    <div class="field">
+      <label>预警阈值（秒，临近报警的提醒）</label>
+      <input type="number" id="warnSec" step="1" min="2" max="60" value="10">
+    </div>
+    <div class="switch" id="modeSwitch">
+      <span class="lbl">实时模式（连接树莓派）</span>
+      <span class="track" id="modeTrack"></span>
+    </div>
+    <div class="field" id="hostField" style="display:none">
+      <label>后端地址（如 192.168.1.20:8000）</label>
+      <input type="text" id="host" value="raspberrypi.local:8000">
+    </div>
+    <button class="btn" id="exportBtn">导出 CSV（当前数据）</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const clamp = (v,a,b)=> Math.max(a, Math.min(b, v));
+  const mod = (a,b)=> ((a%b)+b)%b;
+  const rand = (a,b)=> a + Math.random()*(b-a);
+  const fmtClock = ts => new Date(ts*1000).toLocaleTimeString("zh-CN",{hour12:false});
+  const fmtHM = ts => new Date(ts*1000).toLocaleTimeString("zh-CN",{hour12:false,hour:"2-digit",minute:"2-digit"});
+
+  // ---------- config ----------
+  const cfg = {
+    thUp: 0.5, apneaSec: 20, warnSec: 10,
+    liveWindow: 30, live: false, host: "raspberrypi.local:8000"
+  };
+
+  // ---------- simulation state ----------
+  const S = {
+    t: 0, period: 4.0, amp: 3.2, baseline: 45.0, tempBase: 26.4,
+    lastBreathT: 0, prevHump: 0,
+    apneaEnd: -1, nextApnea: 25, apneaStartT: null, eventCount: 0,
+    breathTimes: [], breathPts: [], liveBuf: [], events: []
+  };
+
+  // ---------- charts ----------
+  const gridC = "rgba(30,38,50,.6)", tickC = "#5c6674";
+  const liveChart = new Chart($("liveChart"), {
+    data:{ datasets:[
+      { label:"呼吸信号", data:[], borderColor:"#2dd4bf", backgroundColor:"rgba(45,212,191,.12)",
+        fill:true, borderWidth:2, pointRadius:0, tension:.25 },
+      { label:"阈值", data:[], borderColor:"#f5b942", borderDash:[6,4],
+        borderWidth:1.2, pointRadius:0, fill:false },
+      { label:"呼气", type:"scatter", data:[], backgroundColor:"#7aa7ff",
+        pointRadius:4, pointStyle:"rectRot", fill:false }
+    ]},
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:false,
+      interaction:{mode:"nearest",intersect:false},
+      plugins:{ legend:{display:false},
+        tooltip:{ backgroundColor:"#161b24", borderColor:"#1e2632", borderWidth:1,
+          titleColor:"#8b96a6", bodyColor:"#e8eef6",
+          callbacks:{ title: c=> fmtClock(c[0].parsed.x),
+            label: c=> c.dataset.label+": "+c.parsed.y.toFixed(2)+" %RH" } } },
+      scales:{
+        x:{ type:"linear", min:0, max:30, grid:{color:gridC,drawTicks:false},
+          ticks:{ color:tickC, maxTicksLimit:7, callback:v=>fmtClock(v) } },
+        y:{ min:-3.5, max:4.5, grid:{color:gridC,drawTicks:false},
+          ticks:{ color:tickC, maxTicksLimit:5, callback:v=>v+" %RH" },
+          title:{display:true,text:"信号",color:tickC,font:{size:11}} }
+      }
+    }
+  });
+
+  const histChart = new Chart($("historyChart"), {
+    data:{ datasets:[
+      { label:"呼吸频率", data:[], borderColor:"#2dd4bf", backgroundColor:"rgba(45,212,191,.10)",
+        fill:true, borderWidth:2, pointRadius:0, tension:.3 },
+      { label:"呼吸暂停", type:"scatter", data:[], backgroundColor:"#ff5f5f",
+        pointRadius:5, pointStyle:"triangle" }
+    ]},
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:false,
+      interaction:{mode:"nearest",intersect:false},
+      plugins:{ legend:{display:false},
+        tooltip:{ backgroundColor:"#161b24", borderColor:"#1e2632", borderWidth:1,
+          titleColor:"#8b96a6", bodyColor:"#e8eef6",
+          callbacks:{ title: c=> fmtHM(c[0].parsed.x),
+            label: c=> c.dataset.type==="scatter"
+              ? "呼吸暂停 "+(c.raw.dur||0).toFixed(0)+" 秒"
+              : "呼吸频率 "+c.parsed.y.toFixed(1)+" 次/分" } },
+      scales:{
+        x:{ type:"linear", grid:{color:gridC,drawTicks:false},
+          ticks:{ color:tickC, maxTicksLimit:9, callback:v=>fmtHM(v) } },
+        y:{ min:0, suggestedMax:24, grid:{color:gridC,drawTicks:false},
+          ticks:{ color:tickC, maxTicksLimit:5 },
+          title:{display:true,text:"次/分",color:tickC,font:{size:11}} }
+      }
+    }
+  });
+
+  // ---------- history generation (demo) ----------
+  let histRange = 1;
+  function genHistory(hours){
+    const pts = [], evs = [], now = Date.now()/1000, step = 60, n = hours*60;
+    let bpm = 15;
+    for(let i=0;i<n;i++){
+      bpm = clamp(bpm + rand(-0.7,0.7), 10, 20);
+      pts.push({x: now-(n-i)*step, y: +bpm.toFixed(1)});
+    }
+    const evCount = Math.round(hours*1.6);
+    for(let i=0;i<evCount;i++){
+      const t = now - rand(0.1, hours*3600);
+      const d = rand(20,35);
+      evs.push({x:t, y:0, dur:d});   // 画在底部轴线上，时长在提示里显示
+    }
+    evs.sort((a,b)=>a.x-b.x);
+    return {pts, evs};
+  }
+  function renderHistory(){
+    const {pts, evs} = genHistory(histRange);
+    histChart.data.datasets[0].data = pts;
+    histChart.data.datasets[1].data = evs;
+    histChart.update();
+  }
+
+  // ---------- breath / event handling ----------
+  function onBreath(t, peak){
+    S.lastBreathT = t;
+    S.breathTimes.push(t);
+    S.breathPts.push({x:t, y:peak});
+  }
+  function bpmNow(){
+    while(S.breathTimes.length && S.t - S.breathTimes[0] > 60) S.breathTimes.shift();
+    return S.breathTimes.length;
+  }
+
+  // ---------- live loop (10 Hz) ----------
+  function tick(){
+    S.t += 0.1;
+
+    // schedule apnea pauses
+    if(S.apneaEnd < 0 && S.t > S.nextApnea){ S.apneaEnd = S.t + rand(20,34); }
+    if(S.apneaEnd > 0 && S.t >= S.apneaEnd){ S.apneaEnd = -1; S.nextApnea = S.t + rand(45,90); }
+    const inApnea = S.apneaEnd > 0 && S.t < S.apneaEnd;
+
+    // exhale hump + noise
+    let hump = 0;
+    if(!inApnea){
+      const frac = mod(S.t, S.period)/S.period;
+      hump = S.amp * Math.exp(-Math.pow((frac-0.32)/0.13, 2));
+    }
+    const signal = hump + rand(-0.06,0.06);
+    const humidity = S.baseline + signal;
+    const temp = S.tempBase + 0.02*Math.sin(S.t/60) + rand(-0.01,0.01);
+
+    // breath detect: falling edge after peak above threshold
+    if(!inApnea && S.prevHump > cfg.thUp && hump < S.prevHump && (S.t - S.lastBreathT) > 1.4){
+      onBreath(S.t, S.prevHump);
+    }
+    S.prevHump = hump;
+
+    // status
+    const since = S.t - S.lastBreathT;
+    const apnea = since > cfg.apneaSec;
+    const warn = !apnea && since > cfg.warnSec;
+
+    // apnea event bookkeeping
+    if(apnea && S.apneaStartT === null){ S.apneaStartT = S.lastBreathT + cfg.apneaSec; }
+    if(!apnea && S.apneaStartT !== null){
+      S.events.unshift({t:S.apneaStartT, dur:S.t - S.apneaStartT});
+      S.eventCount++; S.apneaStartT = null;
+      renderEvents();
+    }
+
+    // buffers
+    S.liveBuf.push({x:S.t, y:signal, h:humidity});
+    const cut = S.t - cfg.liveWindow;
+    while(S.liveBuf.length && S.liveBuf[0].x < cut) S.liveBuf.shift();
+    while(S.breathPts.length && S.breathPts[0].x < cut) S.breathPts.shift();
+
+    updateUI(signal, humidity, temp, since, apnea, warn);
+    updateLiveChart();
+  }
+
+  // ---------- UI updates ----------
+  function setState(mode, text, sub){
+    const hero = $("hero"), st = $("heroState");
+    hero.classList.remove("normal","warn","alarm");
+    st.classList.remove("normal","warn","alarm");
+    hero.classList.add(mode); st.classList.add(mode);
+    $("stateText").textContent = text;
+    $("stateSub").textContent = sub;
+  }
+  function updateUI(signal, humidity, temp, since, apnea, warn){
+    const bpm = bpmNow();
+    $("bpmBig").textContent = bpm;
+    $("humVal").innerHTML = humidity.toFixed(1)+'<span class="u">%RH</span>';
+    $("tempVal").innerHTML = temp.toFixed(1)+'<span class="u">°C</span>';
+    $("sinceVal").innerHTML = since.toFixed(1)+'<span class="u">s</span>';
+    $("thVal").innerHTML = cfg.apneaSec+'<span class="u">s</span>';
+
+    const apneaVal = $("apneaVal"), sinceVal = $("sinceVal"), countVal = $("countVal");
+    if(apnea){
+      apneaVal.innerHTML = Math.floor(since - cfg.apneaSec)+'<span class="u">s</span>';
+      apneaVal.className = "v bad"; sinceVal.className = "v bad";
+      setState("alarm","呼吸暂停 · 报警","已连续无呼吸 "+(since - cfg.apneaSec).toFixed(0)+" 秒");
+    } else if(warn){
+      apneaVal.innerHTML = "0<span class=\"u\">s</span>";
+      apneaVal.className = "v warn"; sinceVal.className = "v warn";
+      setState("warn","临近预警","已 "+since.toFixed(0)+" 秒未检测到呼吸");
+    } else {
+      apneaVal.innerHTML = "0<span class=\"u\">s</span>";
+      apneaVal.className = "v ok"; sinceVal.className = "v ok";
+      setState("normal","正常呼吸","呼吸平稳 · 无异常");
+    }
+    countVal.innerHTML = S.eventCount+'<span class="u">次</span>';
+    countVal.className = S.eventCount ? "v warn" : "v ok";
+
+    // breathing animation
+    const scale = clamp(1 + signal/9, 0.82, 1.35);
+    $("core").style.transform = "scale("+scale.toFixed(3)+")";
+  }
+  function renderEvents(){
+    const ul = $("eventsList");
+    if(!S.events.length){ ul.innerHTML = '<li class="empty">暂无事件</li>'; return; }
+    ul.innerHTML = S.events.slice(0,12).map(e =>
+      '<li><span class="t">'+fmtClock(e.t)+'</span><span class="d">'+e.dur.toFixed(0)+' 秒</span></li>'
+    ).join("");
+  }
+
+  // ---------- live chart update ----------
+  function updateLiveChart(){
+    const d = liveChart.data.datasets;
+    d[0].data = S.liveBuf;
+    d[1].data = [{x:S.t-cfg.liveWindow, y:cfg.thUp},{x:S.t, y:cfg.thUp}];
+    d[2].data = S.breathPts;
+    liveChart.options.scales.x.min = S.t - cfg.liveWindow;
+    liveChart.options.scales.x.max = S.t;
+    liveChart.update("none");
+  }
+
+  // ---------- real mode (WebSocket) ----------
+  let ws = null;
+  function connectReal(host){
+    const url = (host.startsWith("ws") ? host : "ws://"+host+"/ws");
+    ws = new WebSocket(url);
+    ws.onopen = ()=> setSourceBadge(true);
+    ws.onmessage = ev=>{
+      try{
+        const m = JSON.parse(ev.data);
+        S.t = m.t; S.liveBuf.push({x:m.t, y:m.signal, h:m.humidity});
+        if(m.breath){ S.lastBreathT = m.t; S.breathTimes.push(m.t); S.breathPts.push({x:m.t,y:m.signal}); }
+        const since = m.t - S.lastBreathT;
+        const apnea = m.apnea===1 || since > cfg.apneaSec;
+        const warn = !apnea && since > cfg.warnSec;
+        updateUI(m.signal, m.humidity, m.temp??26, since, apnea, warn);
+        updateLiveChart();
+      }catch(e){}
+    };
+    ws.onclose = ()=>{ setSourceBadge(false); };
+    ws.onerror = ()=>{ setSourceBadge(false); };
+  }
+  function setSourceBadge(live){
+    cfg.live = live;
+    const b = $("srcBadge"); b.classList.toggle("live", live);
+    $("srcText").textContent = live ? "实时模式" : "演示模式";
+  }
+
+  // ---------- controls ----------
+  $("settingsBtn").addEventListener("click", ()=> $("panel").classList.toggle("open"));
+  $("rangeSeg").addEventListener("click", e=>{
+    const b = e.target.closest("button"); if(!b) return;
+    histRange = +b.dataset.r;
+    $("rangeSeg").querySelectorAll("button").forEach(x=>x.classList.toggle("active", x===b));
+    renderHistory();
+  });
+  $("modeSwitch").addEventListener("click", ()=>{
+    const on = !cfg.live;
+    $("modeSwitch").classList.toggle("on", on);
+    $("hostField").style.display = on ? "" : "none";
+    if(on){ connectReal($("host").value); } else { if(ws){ ws.close(); ws=null; } setSourceBadge(false); }
+  });
+  $("thUp").addEventListener("change", e=>{ cfg.thUp = clamp(+e.target.value||0.5, 0.1, 5); });
+  $("apneaSec").addEventListener("change", e=>{ cfg.apneaSec = clamp(+e.target.value||20, 5, 120); });
+  $("warnSec").addEventListener("change", e=>{ cfg.warnSec = clamp(+e.target.value||10, 2, 60); });
+  $("host").addEventListener("change", e=>{ cfg.host = e.target.value.trim() || cfg.host; });
+  $("exportBtn").addEventListener("click", ()=>{
+    const rows = [["time","signal","humidity"]].concat(S.liveBuf.map(p=>[p.x.toFixed(2), p.y.toFixed(3), p.h.toFixed(2)]));
+    const csv = rows.map(r=>r.join(",")).join("\n");
+    const blob = new Blob(["\ufeff"+csv],{type:"text/csv;charset=utf-8"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "breath_live_"+Date.now()+".csv";
+    a.click(); URL.revokeObjectURL(a.href);
+  });
+
+  // ---------- clock ----------
+  setInterval(()=>{ $("clock").textContent = new Date().toLocaleTimeString("zh-CN",{hour12:false}); }, 1000);
+
+  // ---------- boot ----------
+  renderHistory();
+  $("clock").textContent = new Date().toLocaleTimeString("zh-CN",{hour12:false});
+  setInterval(tick, 100);
+})();
+</script>
+</body>
+</html>
