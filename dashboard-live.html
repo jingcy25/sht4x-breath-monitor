@@ -199,7 +199,7 @@ window.addEventListener('error', function(e){
           <div><span style="color:var(--faint);font-size:11px">环境温度</span><div><b id="envTemp" style="font-size:22px">--</b><span style="color:var(--faint)"> °C</span></div></div>
           <div><span style="color:var(--faint);font-size:11px">环境湿度</span><div><b id="envHum" style="font-size:22px">--</b><span style="color:var(--faint)"> %</span></div></div>
           <div><span style="color:var(--faint);font-size:11px">光照</span><div><b id="lux" style="font-size:22px">--</b><span style="color:var(--faint)"> lx</span></div></div>
-          <div><span style="color:var(--faint);font-size:11px">床压</span><div><b id="fsr" style="font-size:22px">--</b><span style="color:var(--faint)"> V</span></div></div>
+          <div><span style="color:var(--faint);font-size:11px">床压</span><div><b id="fsr" style="font-size:22px">--</b><span style="color:var(--faint)"> V</span></div><div id="bedState" style="font-size:11px;color:var(--faint);margin-top:2px">--</div></div>
         </div>
       </div>
 
@@ -524,6 +524,12 @@ window.addEventListener('error', function(e){
         put("envHum", m.env_hum, 1);
         put("lux", m.lux, 1);
         put("fsr", m.fsr, 3);
+        const bed = $("bedState");
+        if(bed){
+          const inBed = m.in_bed === 1 || m.in_bed === true;
+          bed.textContent = inBed ? "在床 · 测量中" : "离床 · 待机";
+          bed.style.color = inBed ? "var(--good)" : "var(--faint)";
+        }
         updateLiveChart();
       }catch(e){}
     };

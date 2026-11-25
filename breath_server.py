@@ -113,7 +113,7 @@ class BreathDetector:
 
 
 DB = "breath.db"
-config = {"apnea_sec": 20.0, "th_up": 1.2}
+config = {"apnea_sec": 20.0, "th_up": 1.2, "fsr_in_bed": 0.100}
 cfg_lock = threading.Lock()
 latest = {"t": 0, "humidity": 0.0, "signal": 0.0, "breath": 0,
           "apnea": 0, "bpm": 0.0, "temp": 0.0,
@@ -169,38 +169,37 @@ def sensor_loop():
     buf = []
     last_flush = time.time()
 
+    in_bed = False
+    bed_candidate = False
+    candidate_since = 0.0
+    last_temp = 0.0
+    last_h = 0.0
+
     while True:
         try:
             t = time.time()
-            temp, h = breath_sensor.read()
-            signal, breath = det.update(t, h)
-            if breath:
+
+            if adc is not None and t - last_fsr > 1.0:
+                try:
+                    fsr, _ = adc.read_voltage(0)
+                except Exception:
+                    fsr = None
+                last_fsr = t
+
+            threshold = float(config.get("fsr_in_bed", 0.100))
+            candidate = fsr is not None and fsr < threshold
+            if candidate != bed_candidate:
+                bed_candidate = candidate
+                candidate_since = t
+            elif (t - candidate_since) >= 2.0 and in_bed != bed_candidate:
+                in_bed = bed_candidate
+                det = BreathDetector()
                 last_breath = t
-                breath_times.append(t)
-
-            with cfg_lock:
-                det.th_up = config["th_up"]
-                apnea_sec = config["apnea_sec"]
-
-            apnea = (t - last_breath) > apnea_sec
-
-            if apnea:
-                alarm_event.set()
-            else:
-                alarm_event.clear()
-
-            # 呼吸暂停事件记录
-            if apnea and apnea_start["v"] is None:
-                apnea_start["v"] = last_breath + apnea_sec
-            if not apnea and apnea_start["v"] is not None:
-                st = apnea_start["v"]
-                conn.execute(
-                    "INSERT INTO events(start_ts,end_ts,duration) VALUES(?,?,?)",
-                    (st, t, t - st))
-                conn.commit()
+                breath_times.clear()
                 apnea_start["v"] = None
-
-            bpm = sum(1 for x in breath_times if t - x <= 60)
+                if not in_bed:
+                    alarm_event.clear()
+                print("bed state: %s" % ("in_bed" if in_bed else "standby"), flush=True)
 
             if t - last_slow > 2.0:
                 if env_sensor is not None:
@@ -215,16 +214,57 @@ def sensor_loop():
                         lux = None
                 last_slow = t
 
-            if adc is not None and t - last_fsr > 1.0:
-                try:
-                    fsr, _ = adc.read_voltage(0)
-                except Exception:
-                    fsr = None
-                last_fsr = t
+            if in_bed:
+                temp, h = breath_sensor.read()
+                last_temp, last_h = temp, h
+                signal, breath = det.update(t, h)
+                if breath:
+                    last_breath = t
+                    breath_times.append(t)
+
+                with cfg_lock:
+                    det.th_up = config["th_up"]
+                    apnea_sec = config["apnea_sec"]
+
+                apnea = (t - last_breath) > apnea_sec
+                if apnea:
+                    alarm_event.set()
+                else:
+                    alarm_event.clear()
+
+                if apnea and apnea_start["v"] is None:
+                    apnea_start["v"] = last_breath + apnea_sec
+                if not apnea and apnea_start["v"] is not None:
+                    st = apnea_start["v"]
+                    conn.execute(
+                        "INSERT INTO events(start_ts,end_ts,duration) VALUES(?,?,?)",
+                        (st, t, t - st))
+                    conn.commit()
+                    apnea_start["v"] = None
+
+                bpm = sum(1 for x in breath_times if t - x <= 60)
+
+                buf.append((t, h, signal, 1 if breath else 0, 1 if apnea else 0))
+                if time.time() - last_flush > 1.0:
+                    conn.executemany(
+                        "INSERT INTO samples(ts,humidity,signal,breath,apnea) VALUES(?,?,?,?,?)",
+                        buf)
+                    conn.commit()
+                    buf = []
+                    last_flush = time.time()
+            else:
+                temp, h = last_temp, last_h
+                signal = 0.0
+                breath = False
+                apnea = False
+                bpm = 0
+                alarm_event.clear()
 
             msg = {"t": t, "humidity": round(h, 2), "signal": round(signal, 3),
                    "breath": 1 if breath else 0, "apnea": 1 if apnea else 0,
                    "bpm": round(bpm, 1), "temp": round(temp, 1),
+                   "in_bed": 1 if in_bed else 0,
+                   "standby": 0 if in_bed else 1,
                    "env_temp": None if env_temp is None else round(env_temp, 1),
                    "env_hum": None if env_hum is None else round(env_hum, 1),
                    "lux": None if lux is None else round(lux, 1),
@@ -232,15 +272,6 @@ def sensor_loop():
 
             with latest_lock:
                 latest.update(msg)
-
-            buf.append((t, h, signal, 1 if breath else 0, 1 if apnea else 0))
-            if time.time() - last_flush > 1.0:
-                conn.executemany(
-                    "INSERT INTO samples(ts,humidity,signal,breath,apnea) VALUES(?,?,?,?,?)",
-                    buf)
-                conn.commit()
-                buf = []
-                last_flush = time.time()
 
             text = json.dumps(msg)
             with clients_lock:
@@ -331,6 +362,8 @@ def api_config():
             config["th_up"] = float(data["th_up"])
         if "apnea_sec" in data:
             config["apnea_sec"] = float(data["apnea_sec"])
+        if "fsr_in_bed" in data:
+            config["fsr_in_bed"] = float(data["fsr_in_bed"])
         return jsonify({"ok": True, "config": dict(config)})
 
 
